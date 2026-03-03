@@ -29,24 +29,24 @@ let banCache = new Map();
 /* UTILITIES */
 /* ========================= */
 
-function todayISO() {
-  return new Date().toISOString().split("T")[0];
-}
-
 function phTime() {
   return new Date().toLocaleString("en-PH", {
     timeZone: "Asia/Manila"
   });
 }
 
+function todayISO() {
+  return new Date().toISOString().split("T")[0];
+}
+
 function addDays(days) {
   const d = new Date();
   d.setDate(d.getDate() + days);
-  return d.toISOString();
+  return d;
 }
 
 /* ========================= */
-/* DISCORD LOGGER */
+/* DISCORD */
 /* ========================= */
 
 async function logToDiscord(title, description, color = 15158332) {
@@ -69,13 +69,13 @@ async function logToDiscord(title, description, color = 15158332) {
 }
 
 /* ========================= */
-/* DESCRIPTION PARSER */
+/* DESCRIPTION PARSE */
 /* ========================= */
 
 function parseDescription(desc) {
   const get = (key) => {
-    const m = desc.match(new RegExp(`${key}:\\s*(.*)`));
-    return m ? m[1].trim() : "";
+    const match = desc.match(new RegExp(`${key}:\\s*(.*)`));
+    return match ? match[1].trim() : "";
   };
 
   return {
@@ -85,7 +85,7 @@ function parseDescription(desc) {
     startDate: get("Start Date"),
     dueDate: get("Due Date"),
     appealable: get("Appealable"),
-    attempts: parseInt(get("Join Attempts") || 0)
+    attempts: parseInt(get("Join Attempts") || "0")
   };
 }
 
@@ -102,18 +102,26 @@ Join Attempts: ${data.attempts}
 }
 
 /* ========================= */
-/* REFRESH CACHE */
+/* CACHE REFRESH */
 /* ========================= */
 
 async function refreshBanCache() {
-  const lists = [BANNED_LIST_ID, TEMP_BANNED_LIST_ID];
+  if (!TRELLO_KEY || !TRELLO_TOKEN) return;
 
+  const lists = [BANNED_LIST_ID, TEMP_BANNED_LIST_ID];
   banCache.clear();
 
   for (const listId of lists) {
+    if (!listId) continue;
+
     const res = await axios.get(
       `https://api.trello.com/1/lists/${listId}/cards`,
-      { params: { key: TRELLO_KEY, token: TRELLO_TOKEN } }
+      {
+        params: {
+          key: TRELLO_KEY,
+          token: TRELLO_TOKEN
+        }
+      }
     );
 
     for (const card of res.data) {
@@ -123,9 +131,7 @@ async function refreshBanCache() {
       const userId = match[0];
 
       banCache.set(userId, {
-        cardId: card.id,
-        desc: card.desc,
-        listId
+        cardId: card.id
       });
     }
   }
@@ -134,42 +140,59 @@ async function refreshBanCache() {
 }
 
 /* ========================= */
-/* APPLY BAN LOGIC */
+/* INCREMENT ATTEMPT (FIXED) */
 /* ========================= */
 
-async function syncBanToTrello(cardId, data) {
-  let startISO = null;
-  let dueISO = null;
-  let listId = BANNED_LIST_ID;
+async function incrementJoinAttempt(userId, cardId) {
+  // ALWAYS fetch fresh card
+  const cardRes = await axios.get(
+    `https://api.trello.com/1/cards/${cardId}`,
+    {
+      params: { key: TRELLO_KEY, token: TRELLO_TOKEN }
+    }
+  );
 
-  if (data.appealable === "YES") {
-    const startDate = new Date();
-    const dueDate = addDays(60);
+  const parsed = parseDescription(cardRes.data.desc);
 
-    startISO = startDate.toISOString();
-    dueISO = dueDate;
+  parsed.attempts = (parsed.attempts || 0) + 1;
 
-    data.duration = "60 Days";
-    data.startDate = startDate.toISOString().split("T")[0];
-    data.dueDate = new Date(dueDate).toISOString().split("T")[0];
-
-    listId = TEMP_BANNED_LIST_ID;
-  } else {
-    data.duration = "PERMANENT";
-    data.startDate = todayISO();
-    data.dueDate = "N/A";
-  }
-
-  const updatedDesc = buildDescription(data);
+  const updatedDesc = buildDescription(parsed);
 
   await axios.put(
     `https://api.trello.com/1/cards/${cardId}`,
+    { desc: updatedDesc },
     {
-      desc: updatedDesc,
-      idList: listId,
-      start: startISO,
-      due: dueISO
+      params: { key: TRELLO_KEY, token: TRELLO_TOKEN }
+    }
+  );
+
+  await axios.post(
+    `https://api.trello.com/1/cards/${cardId}/actions/comments`,
+    {
+      text: `Attempted to join\nTime (PH): ${phTime()}\nProfile: https://www.roblox.com/users/${userId}/profile`
     },
+    {
+      params: { key: TRELLO_KEY, token: TRELLO_TOKEN }
+    }
+  );
+
+  await logToDiscord(
+    "🚨 Join Attempt",
+    `User ID: ${userId}\nAttempts: ${parsed.attempts}`,
+    16753920
+  );
+
+  console.log("Attempts updated:", parsed.attempts);
+}
+
+/* ========================= */
+/* MOVE CARD */
+/* ========================= */
+
+async function moveCard(cardId, listId) {
+  await axios.put(
+    `https://api.trello.com/1/cards/${cardId}`,
+    { idList: listId },
     {
       params: { key: TRELLO_KEY, token: TRELLO_TOKEN }
     }
@@ -187,79 +210,41 @@ app.get("/checkban", async (req, res) => {
   const record = banCache.get(userId);
   if (!record) return res.json({ permanent: false });
 
-  const cardRes = await axios.get(
-    `https://api.trello.com/1/cards/${record.cardId}`,
-    { params: { key: TRELLO_KEY, token: TRELLO_TOKEN } }
-  );
-
-  const due = cardRes.data.due;
-
-  // AUTO EXPIRE
-  if (due && new Date() > new Date(due)) {
-    await moveCard(record.cardId, RESOLVED_LIST_ID);
-    banCache.delete(userId);
-
-    await logToDiscord(
-      "✅ Ban Expired",
-      `User ID: ${userId}`
+  try {
+    const cardRes = await axios.get(
+      `https://api.trello.com/1/cards/${record.cardId}`,
+      {
+        params: { key: TRELLO_KEY, token: TRELLO_TOKEN }
+      }
     );
 
+    const due = cardRes.data.due;
+    const parsed = parseDescription(cardRes.data.desc);
+
+    // AUTO EXPIRE TEMP BAN
+    if (due && new Date() > new Date(due)) {
+      await moveCard(record.cardId, RESOLVED_LIST_ID);
+      await refreshBanCache();
+
+      await logToDiscord(
+        "✅ Ban Expired",
+        `User ID: ${userId}`
+      );
+
+      return res.json({ permanent: false });
+    }
+
+    await incrementJoinAttempt(userId, record.cardId);
+
+    return res.json({
+      permanent: parsed.duration === "PERMANENT"
+    });
+
+  } catch (err) {
+    console.log("Checkban error:", err.message);
     return res.json({ permanent: false });
   }
-
-  await incrementJoinAttempt(userId, record);
-
-  const parsed = parseDescription(record.desc);
-
-  return res.json({
-    permanent: parsed.duration === "PERMANENT"
-  });
 });
-
-/* ========================= */
-/* INCREMENT ATTEMPT */
-/* ========================= */
-
-async function incrementJoinAttempt(userId, record) {
-  const parsed = parseDescription(record.desc);
-  parsed.attempts++;
-
-  const updatedDesc = buildDescription(parsed);
-
-  await axios.put(
-    `https://api.trello.com/1/cards/${record.cardId}`,
-    { desc: updatedDesc },
-    { params: { key: TRELLO_KEY, token: TRELLO_TOKEN } }
-  );
-
-  await axios.post(
-    `https://api.trello.com/1/cards/${record.cardId}/actions/comments`,
-    {
-      text: `Attempted to join
-Time (PH): ${phTime()}
-Profile: https://www.roblox.com/users/${userId}/profile`
-    },
-    { params: { key: TRELLO_KEY, token: TRELLO_TOKEN } }
-  );
-
-  await logToDiscord(
-    "🚨 Join Attempt",
-    `User ID: ${userId}\nAttempts: ${parsed.attempts}`,
-    16753920
-  );
-}
-
-/* ========================= */
-/* MOVE CARD */
-/* ========================= */
-
-async function moveCard(cardId, listId) {
-  await axios.put(
-    `https://api.trello.com/1/cards/${cardId}`,
-    { idList: listId },
-    { params: { key: TRELLO_KEY, token: TRELLO_TOKEN } }
-  );
-}
 
 /* ========================= */
 /* WEBHOOK */
@@ -274,7 +259,7 @@ app.post("/webhook", async (req, res) => {
 });
 
 /* ========================= */
-/* TEST DISCORD */
+/* DISCORD TEST */
 /* ========================= */
 
 app.get("/test-discord", async (req, res) => {
@@ -290,5 +275,10 @@ const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, async () => {
   console.log("Server running...");
-  await refreshBanCache();
+
+  try {
+    await refreshBanCache();
+  } catch (err) {
+    console.log("Startup warning:", err.message);
+  }
 });
