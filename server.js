@@ -84,7 +84,6 @@ async function robloxBan(gameKey, userId, permanent, days = 60) {
 }
 
 async function robloxUnban(gameKey, userId) {
-
   const game = GAMES[gameKey];
   if (!game) return;
 
@@ -245,59 +244,32 @@ Join Attempts: ${attempts}`;
 }
 
 /* ========================= */
-/* JOIN ATTEMPT */
+/* RESOLVE ENDPOINT */
 /* ========================= */
 
-async function handleJoinAttempt(cardId) {
+app.post("/resolve", async (req, res) => {
 
-  const card = await axios.get(
-    `https://api.trello.com/1/cards/${cardId}`,
-    { params: { key: TRELLO_KEY, token: TRELLO_TOKEN } }
-  );
+  const { userId } = req.body;
 
-  const desc = card.data.desc || "";
-  const match = desc.match(/Join Attempts:\s*(\d+)/);
-  let attempts = match ? parseInt(match[1]) : 0;
-  attempts++;
+  if (!banCache.has(userId))
+    return res.status(404).json({ error: "Card not found" });
 
-  const updated = desc.replace(
-    /Join Attempts:\s*\d+/,
-    `Join Attempts: ${attempts}`
-  );
+  const { cardId } = banCache.get(userId);
 
   await axios.put(
     `https://api.trello.com/1/cards/${cardId}`,
-    { desc: updated },
+    { idList: RESOLVED_LIST_ID },
     { params: { key: TRELLO_KEY, token: TRELLO_TOKEN } }
   );
 
-  await axios.post(
-    `https://api.trello.com/1/cards/${cardId}/actions/comments`,
-    {
-      text: `Attempted to join
-Time (PH): ${phTime()}`
-    },
-    { params: { key: TRELLO_KEY, token: TRELLO_TOKEN } }
-  );
-}
-
-/* ========================= */
-/* ENDPOINTS */
-/* ========================= */
-
-app.post("/ban", async (req, res) => {
-
-  const { userId, username, type, game } = req.body;
-
-  if (!userId || !username || !type || !game)
-    return res.status(400).json({ error: "Missing data" });
-
-  const cardId = await getOrCreateCard(userId, username);
-  await applyBan(game, cardId, userId, username, type);
   await refreshCache();
 
   res.json({ success: true });
 });
+
+/* ========================= */
+/* CHECK BAN */
+/* ========================= */
 
 app.get("/checkban", async (req, res) => {
 
@@ -313,29 +285,10 @@ app.get("/checkban", async (req, res) => {
     { params: { key: TRELLO_KEY, token: TRELLO_TOKEN } }
   );
 
-  // ✅ FINAL ADDITION: RESOLVED = NOT BANNED
-  if (card.data.idList === RESOLVED_LIST_ID) {
+  if (card.data.idList === RESOLVED_LIST_ID)
     return res.json({ banned: false });
-  }
 
   const reason = extractReason(card.data.desc);
-
-  if (card.data.due && new Date() > new Date(card.data.due)) {
-
-    await robloxUnban(game, userId);
-
-    await axios.put(
-      `https://api.trello.com/1/cards/${cardId}`,
-      { idList: RESOLVED_LIST_ID },
-      { params: { key: TRELLO_KEY, token: TRELLO_TOKEN } }
-    );
-
-    await refreshCache();
-
-    return res.json({ banned: false });
-  }
-
-  await handleJoinAttempt(cardId);
 
   return res.json({
     banned: true,
@@ -345,5 +298,5 @@ app.get("/checkban", async (req, res) => {
 
 app.listen(process.env.PORT || 3000, async () => {
   await refreshCache();
-  console.log("NOX Enterprise Moderation Running");
+  console.log("NOX Moderation Running");
 });
