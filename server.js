@@ -6,6 +6,10 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+/* ========================= */
+/* ENV CONFIG */
+/* ========================= */
+
 const {
     TRELLO_KEY,
     TRELLO_TOKEN,
@@ -20,8 +24,8 @@ const {
 /* ========================= */
 
 let banCache = new Map();
-let userCache = new Map();        // userId → response
-let usernameCache = new Map();    // username → userId
+let userCache = new Map();
+let usernameCache = new Map();
 
 /* ========================= */
 /* UTILITIES */
@@ -33,6 +37,41 @@ function getPHTime() {
     });
 }
 
+async function logToDiscord(title, description, color = 15158332) {
+    if (!DISCORD_WEBHOOK) {
+        console.log("Discord webhook not configured");
+        return;
+    }
+
+    try {
+        await axios.post(
+            DISCORD_WEBHOOK,
+            {
+                embeds: [
+                    {
+                        title,
+                        description,
+                        color,
+                        timestamp: new Date().toISOString()
+                    }
+                ]
+            },
+            {
+                headers: { "Content-Type": "application/json" },
+                timeout: 5000
+            }
+        );
+
+        console.log("Discord log sent");
+    } catch (err) {
+        if (err.response) {
+            console.log("Discord error:", err.response.status, err.response.data);
+        } else {
+            console.log("Discord request failed:", err.message);
+        }
+    }
+}
+
 /* ========================= */
 /* TRELL0 CACHE */
 /* ========================= */
@@ -41,9 +80,7 @@ async function refreshBanCache() {
     try {
         const response = await axios.get(
             `https://api.trello.com/1/lists/${BANNED_LIST_ID}/cards`,
-            {
-                params: { key: TRELLO_KEY, token: TRELLO_TOKEN }
-            }
+            { params: { key: TRELLO_KEY, token: TRELLO_TOKEN } }
         );
 
         banCache.clear();
@@ -74,10 +111,11 @@ app.get("/search", async (req, res) => {
     let { userId, username } = req.query;
 
     try {
-        // ID direct search
         if (!userId && username) {
-            if (usernameCache.has(username.toLowerCase())) {
-                userId = usernameCache.get(username.toLowerCase());
+            const lower = username.toLowerCase();
+
+            if (usernameCache.has(lower)) {
+                userId = usernameCache.get(lower);
             } else {
                 const robloxRes = await axios.post(
                     "https://users.roblox.com/v1/usernames/users",
@@ -93,7 +131,7 @@ app.get("/search", async (req, res) => {
                 }
 
                 userId = String(robloxRes.data.data[0].id);
-                usernameCache.set(username.toLowerCase(), userId);
+                usernameCache.set(lower, userId);
             }
         }
 
@@ -108,7 +146,6 @@ app.get("/search", async (req, res) => {
         const record = banCache.get(userId);
         if (!record) return res.json({ found: false });
 
-        // PARALLEL ROBLOX CALLS
         const [userRes, avatarRes] = await Promise.all([
             axios.get(`https://users.roblox.com/v1/users/${userId}`),
             axios.get(
@@ -160,14 +197,16 @@ app.get("/checkban", async (req, res) => {
     const record = banCache.get(userId);
 
     if (record) {
-        logJoinAttempt(userId, record.cardId, "MAIN");
+        await logJoinAttempt(userId, record.cardId, "MAIN");
         return res.json({ permanent: true });
     }
 
     if (mainId && banCache.has(String(mainId))) {
         const mainRecord = banCache.get(String(mainId));
-        logJoinAttempt(userId, mainRecord.cardId, "ALT");
-        autoBanAlt(userId);
+
+        await logJoinAttempt(userId, mainRecord.cardId, "ALT");
+        await autoBanAlt(userId);
+
         return res.json({ permanent: true });
     }
 
@@ -175,7 +214,7 @@ app.get("/checkban", async (req, res) => {
 });
 
 /* ========================= */
-/* JOIN LOG */
+/* JOIN LOGGING */
 /* ========================= */
 
 async function logJoinAttempt(userId, cardId, type) {
@@ -194,32 +233,20 @@ Profile: https://www.roblox.com/users/${userId}/profile
             { params: { key: TRELLO_KEY, token: TRELLO_TOKEN } }
         );
 
+        await logToDiscord(
+            "🚨 Join Attempt",
+            `Type: ${type}\nUserId: ${userId}\nTime: ${timestamp}`
+        );
+
         console.log("Join attempt logged");
+
     } catch (err) {
         console.log("Join log failed:", err.message);
     }
 }
 
 /* ========================= */
-/* WEBHOOK FIX */
-/* ========================= */
-
-app.get("/webhook", (req, res) => {
-    res.status(200).send("OK");
-});
-
-app.head("/webhook", (req, res) => {
-    res.sendStatus(200);
-});
-
-app.post("/webhook", async (req, res) => {
-    console.log("Webhook triggered");
-    refreshBanCache(); // non-blocking
-    res.sendStatus(200);
-});
-
-/* ========================= */
-/* ALT BAN */
+/* ALT AUTO BAN */
 /* ========================= */
 
 async function autoBanAlt(userId) {
@@ -236,14 +263,42 @@ async function autoBanAlt(userId) {
             { headers: { "x-api-key": ROBLOX_API_KEY } }
         );
 
+        await logToDiscord(
+            "⚠️ Alt Auto-Banned",
+            `UserId: ${userId}`
+        );
+
         console.log("Alt auto-banned");
+
     } catch (err) {
         console.log("Alt ban failed:", err.message);
     }
 }
 
 /* ========================= */
-/* DESCRIPTION PARSERS */
+/* WEBHOOK (TRELLO SYNC) */
+/* ========================= */
+
+app.get("/webhook", (req, res) => res.sendStatus(200));
+app.head("/webhook", (req, res) => res.sendStatus(200));
+
+app.post("/webhook", async (req, res) => {
+    console.log("Trello webhook triggered");
+    refreshBanCache();
+    res.sendStatus(200);
+});
+
+/* ========================= */
+/* DISCORD TEST ROUTE */
+/* ========================= */
+
+app.get("/test-discord", async (req, res) => {
+    await logToDiscord("✅ Discord Test", "Webhook working properly");
+    res.send("Test sent");
+});
+
+/* ========================= */
+/* PARSERS */
 /* ========================= */
 
 function extractReason(desc) {
