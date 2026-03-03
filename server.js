@@ -63,6 +63,10 @@ app.get("/webhook", (req, res) => {
     res.status(200).send("Webhook ready");
 });
 
+app.head("/webhook", (req, res) => {
+    res.sendStatus(200);
+});
+
 app.post("/webhook", async (req, res) => {
     await refreshBanCache();
     res.sendStatus(200);
