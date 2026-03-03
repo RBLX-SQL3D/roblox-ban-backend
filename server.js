@@ -29,7 +29,7 @@ function isoNow() {
   return new Date().toISOString();
 }
 
-function isoPlus60Days() {
+function isoPlus60() {
   const d = new Date();
   d.setDate(d.getDate() + 60);
   return d.toISOString();
@@ -42,7 +42,13 @@ async function refreshCache() {
 
   const res = await axios.get(
     `https://api.trello.com/1/boards/${BOARD_ID}/cards`,
-    { params: { key: TRELLO_KEY, token: TRELLO_TOKEN } }
+    {
+      params: {
+        key: TRELLO_KEY,
+        token: TRELLO_TOKEN,
+        cards: "open"
+      }
+    }
   );
 
   for (const card of res.data) {
@@ -52,36 +58,32 @@ async function refreshCache() {
   }
 }
 
-/* ================= DESCRIPTION PARSE ================= */
+/* ================= DESCRIPTION ================= */
 
-function parseDescription(desc) {
+function parseDesc(desc) {
   const lines = desc ? desc.split("\n") : [];
   const data = {};
-
   for (const line of lines) {
     const parts = line.split(": ");
-    if (parts.length >= 2) {
+    if (parts.length >= 2)
       data[parts[0].trim()] = parts.slice(1).join(": ").trim();
-    }
   }
-
   return data;
 }
 
-function buildDescription(data) {
-  return `Profile: ${data.Profile}
-Reason: ${data.Reason}
-Duration: ${data.Duration}
-Appealable: ${data.Appealable}
-Start Date: ${data["Start Date"] || "N/A"}
-Due Date: ${data["Due Date"] || "N/A"}
-Join Attempts: ${data["Join Attempts"]}`;
+function buildDesc(d) {
+  return `Profile: ${d.Profile}
+Reason: ${d.Reason}
+Duration: ${d.Duration}
+Appealable: ${d.Appealable}
+Start Date: ${d["Start Date"] || "N/A"}
+Due Date: ${d["Due Date"] || "N/A"}
+Join Attempts: ${d["Join Attempts"]}`;
 }
 
-/* ================= CREATE / GET CARD ================= */
+/* ================= CREATE ================= */
 
 async function getOrCreateCard(userId, username) {
-
   if (banCache.has(userId))
     return banCache.get(userId).cardId;
 
@@ -98,7 +100,7 @@ Start Date: ${phNow()}
 Due Date: ${phNow()}
 Join Attempts: 0`,
       start: isoNow(),
-      due: isoPlus60Days()
+      due: isoPlus60()
     },
     { params: { key: TRELLO_KEY, token: TRELLO_TOKEN } }
   );
@@ -117,13 +119,12 @@ app.post("/ban", async (req, res) => {
 
   const cardId = await getOrCreateCard(userId, username);
 
-  const cardRes = await axios.get(
+  const card = await axios.get(
     `https://api.trello.com/1/cards/${cardId}`,
     { params: { key: TRELLO_KEY, token: TRELLO_TOKEN } }
   );
 
-  const existing = parseDescription(cardRes.data.desc);
-
+  const existing = parseDesc(card.data.desc);
   const reason = existing.Reason || "Not Specified";
 
   let updated = {
@@ -143,7 +144,7 @@ app.post("/ban", async (req, res) => {
       `https://api.trello.com/1/cards/${cardId}`,
       {
         idList: BANNED_LIST_ID,
-        desc: buildDescription(updated),
+        desc: buildDesc(updated),
         start: null,
         due: null
       },
@@ -161,9 +162,9 @@ app.post("/ban", async (req, res) => {
       `https://api.trello.com/1/cards/${cardId}`,
       {
         idList: TEMP_BANNED_LIST_ID,
-        desc: buildDescription(updated),
+        desc: buildDesc(updated),
         start: isoNow(),
-        due: isoPlus60Days()
+        due: isoPlus60()
       },
       { params: { key: TRELLO_KEY, token: TRELLO_TOKEN } }
     );
@@ -171,6 +172,65 @@ app.post("/ban", async (req, res) => {
 
   await refreshCache();
   res.json({ success: true });
+});
+
+/* ================= CHECK BAN ================= */
+
+app.get("/checkban", async (req, res) => {
+
+  const { userId } = req.query;
+  if (!banCache.has(userId))
+    return res.json({ banned: false });
+
+  const { cardId } = banCache.get(userId);
+
+  const card = await axios.get(
+    `https://api.trello.com/1/cards/${cardId}`,
+    { params: { key: TRELLO_KEY, token: TRELLO_TOKEN } }
+  );
+
+  if (card.data.closed === true)
+    return res.json({ banned: false });
+
+  if (card.data.idList === RESOLVED_LIST_ID)
+    return res.json({ banned: false });
+
+  /* AUTO EXPIRE TEMP BAN */
+
+  if (card.data.idList === TEMP_BANNED_LIST_ID && card.data.due) {
+    const due = new Date(card.data.due);
+    if (new Date() > due) {
+      await axios.put(
+        `https://api.trello.com/1/cards/${cardId}`,
+        { idList: RESOLVED_LIST_ID, start: null, due: null },
+        { params: { key: TRELLO_KEY, token: TRELLO_TOKEN } }
+      );
+      await refreshCache();
+      return res.json({ banned: false });
+    }
+  }
+
+  const data = parseDesc(card.data.desc);
+
+  const attempts = parseInt(data["Join Attempts"] || "0") + 1;
+  data["Join Attempts"] = attempts;
+
+  await axios.put(
+    `https://api.trello.com/1/cards/${cardId}`,
+    { desc: buildDesc(data) },
+    { params: { key: TRELLO_KEY, token: TRELLO_TOKEN } }
+  );
+
+  await axios.post(
+    `https://api.trello.com/1/cards/${cardId}/actions/comments`,
+    { text: `Attempted to join: ${phNow()}` },
+    { params: { key: TRELLO_KEY, token: TRELLO_TOKEN } }
+  );
+
+  return res.json({
+    banned: true,
+    reason: data.Reason
+  });
 });
 
 /* ================= RESOLVE ================= */
@@ -185,58 +245,12 @@ app.post("/resolve", async (req, res) => {
 
   await axios.put(
     `https://api.trello.com/1/cards/${cardId}`,
-    {
-      idList: RESOLVED_LIST_ID,
-      start: null,
-      due: null
-    },
+    { idList: RESOLVED_LIST_ID, start: null, due: null },
     { params: { key: TRELLO_KEY, token: TRELLO_TOKEN } }
   );
 
   await refreshCache();
   res.json({ success: true });
-});
-
-/* ================= CHECK BAN ================= */
-
-app.get("/checkban", async (req, res) => {
-
-  const { userId } = req.query;
-
-  if (!banCache.has(userId))
-    return res.json({ banned: false });
-
-  const { cardId } = banCache.get(userId);
-
-  const card = await axios.get(
-    `https://api.trello.com/1/cards/${cardId}`,
-    { params: { key: TRELLO_KEY, token: TRELLO_TOKEN } }
-  );
-
-  if (card.data.idList === RESOLVED_LIST_ID)
-    return res.json({ banned: false });
-
-  const data = parseDescription(card.data.desc);
-
-  const attempts = parseInt(data["Join Attempts"] || "0") + 1;
-  data["Join Attempts"] = attempts;
-
-  await axios.put(
-    `https://api.trello.com/1/cards/${cardId}`,
-    { desc: buildDescription(data) },
-    { params: { key: TRELLO_KEY, token: TRELLO_TOKEN } }
-  );
-
-  await axios.post(
-    `https://api.trello.com/1/cards/${cardId}/actions/comments`,
-    { text: `Attempted to join: ${phNow()}` },
-    { params: { key: TRELLO_KEY, token: TRELLO_TOKEN } }
-  );
-
-  return res.json({
-    banned: true,
-    reason: data.Reason
-  });
 });
 
 app.listen(process.env.PORT || 3000, async () => {
