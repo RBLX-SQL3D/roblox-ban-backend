@@ -7,7 +7,7 @@ app.use(cors());
 app.use(express.json());
 
 /* ========================= */
-/* ENV CONFIG */
+/* ENV VARIABLES */
 /* ========================= */
 
 const {
@@ -19,9 +19,9 @@ const {
   DISCORD_WEBHOOK
 } = process.env;
 
-/* ========================= */
-/* CACHE */
-/* ========================= */
+if (!TRELLO_KEY || !TRELLO_TOKEN) {
+  console.log("Missing Trello credentials.");
+}
 
 let banCache = new Map();
 
@@ -34,10 +34,6 @@ function phTime() {
     timeZone: "Asia/Manila"
   });
 }
-
-/* ========================= */
-/* SAFE FIELD EXTRACTION */
-/* ========================= */
 
 function extractField(desc, key) {
   const regex = new RegExp(`${key}:\\s*(.*)`, "gi");
@@ -99,7 +95,6 @@ async function logToDiscord(title, description, color = 15158332) {
 /* ========================= */
 
 async function refreshBanCache() {
-  if (!TRELLO_KEY || !TRELLO_TOKEN) return;
 
   banCache.clear();
 
@@ -110,15 +105,11 @@ async function refreshBanCache() {
 
     const res = await axios.get(
       `https://api.trello.com/1/lists/${listId}/cards`,
-      {
-        params: {
-          key: TRELLO_KEY,
-          token: TRELLO_TOKEN
-        }
-      }
+      { params: { key: TRELLO_KEY, token: TRELLO_TOKEN } }
     );
 
     for (const card of res.data) {
+
       const match = card.name.match(/\d+/);
       if (!match) continue;
 
@@ -128,23 +119,67 @@ async function refreshBanCache() {
     }
   }
 
-  console.log("Cache loaded:", banCache.size);
+  console.log("Ban cache loaded:", banCache.size);
 }
 
 /* ========================= */
-/* MOVE CARD */
+/* APPLY / UPDATE BAN */
 /* ========================= */
 
-async function moveCard(cardId, listId) {
+async function applyBan(cardId, data) {
+
+  const reasonUpper = data.reason.toUpperCase().trim();
+
+  let start = null;
+  let due = null;
+  let listId = BANNED_LIST_ID;
+
+  // POLICY:
+  // If NOT EXPLOITING → 60 DAYS TEMP
+  if (!reasonUpper.includes("EXPLOIT")) {
+
+    const startDate = new Date();
+    const dueDate = new Date();
+    dueDate.setDate(startDate.getDate() + 60);
+
+    start = startDate.toISOString();
+    due = dueDate.toISOString();
+
+    data.duration = "60 Days";
+    data.appealable = "YES";
+    listId = TEMP_BANNED_LIST_ID;
+
+  } else {
+
+    data.duration = "PERMANENT";
+    data.appealable = "NO";
+    listId = BANNED_LIST_ID;
+
+  }
+
+  const updatedDesc = buildDescription(data);
+
   await axios.put(
     `https://api.trello.com/1/cards/${cardId}`,
-    { idList: listId },
+    {
+      desc: updatedDesc,
+      idList: listId,
+      start: start,
+      due: due
+    },
     { params: { key: TRELLO_KEY, token: TRELLO_TOKEN } }
+  );
+
+  await refreshBanCache();
+
+  await logToDiscord(
+    "🔨 Ban Applied/Updated",
+    `Card ID: ${cardId}\nReason: ${data.reason}\nDuration: ${data.duration}`
   );
 }
 
 /* ========================= */
-/* INCREMENT ATTEMPT (SAFE) */
+/* INCREMENT JOIN ATTEMPT */
 /* ========================= */
 
 async function incrementJoinAttempt(userId, cardId) {
@@ -155,7 +190,6 @@ async function incrementJoinAttempt(userId, cardId) {
   );
 
   const parsed = parseDescription(cardRes.data.desc);
-
   parsed.attempts += 1;
 
   const updatedDesc = buildDescription(parsed);
@@ -205,13 +239,16 @@ app.get("/checkban", async (req, res) => {
 
     // AUTO EXPIRE TEMP BAN
     if (due && new Date() > new Date(due)) {
-      await moveCard(record.cardId, RESOLVED_LIST_ID);
+
+      await axios.put(
+        `https://api.trello.com/1/cards/${record.cardId}`,
+        { idList: RESOLVED_LIST_ID },
+        { params: { key: TRELLO_KEY, token: TRELLO_TOKEN } }
+      );
+
       await refreshBanCache();
 
-      await logToDiscord(
-        "✅ Ban Expired",
-        `User ID: ${userId}`
-      );
+      await logToDiscord("✅ Ban Expired", `User ID: ${userId}`);
 
       return res.json({ permanent: false });
     }
@@ -229,11 +266,11 @@ app.get("/checkban", async (req, res) => {
 });
 
 /* ========================= */
-/* WEBHOOK */
+/* TRELLO WEBHOOK */
 /* ========================= */
 
-app.get("/webhook", (req, res) => res.sendStatus(200));
 app.head("/webhook", (req, res) => res.sendStatus(200));
+app.get("/webhook", (req, res) => res.sendStatus(200));
 
 app.post("/webhook", async (req, res) => {
   await refreshBanCache();
@@ -241,17 +278,17 @@ app.post("/webhook", async (req, res) => {
 });
 
 /* ========================= */
-/* START */
+/* START SERVER */
 /* ========================= */
 
 const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, async () => {
-  console.log("Server running...");
+  console.log("Server running on port", PORT);
 
   try {
     await refreshBanCache();
   } catch (err) {
-    console.log("Startup warning:", err.message);
+    console.log("Startup cache error:", err.message);
   }
 });
