@@ -1,24 +1,25 @@
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Moderation Records</title>
-  <link rel="stylesheet" href="style.css" />
+    <title>Moderation Records</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="style.css">
 </head>
 <body>
 
-<div class="container">
-  <h1>Moderation Records</h1>
+    <div class="background"></div>
 
-  <div class="search-box">
-    <input type="text" id="searchInput" placeholder="Enter Roblox Username or User ID" />
-    <button onclick="searchUser()">Search</button>
-  </div>
+    <div class="container">
+        <h1>Moderation Records</h1>
 
-  <div id="result" class="result hidden"></div>
-</div>
+        <div class="search-box">
+            <input type="text" id="searchInput" placeholder="Enter Roblox Username or User ID">
+            <button onclick="searchUser()">Search</button>
+        </div>
 
-<script src="script.js"></script>
+        <div id="result" class="hidden"></div>
+    </div>
+
+    <script src="script.js"></script>
 </body>
 </html>
