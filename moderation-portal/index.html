@@ -5,21 +5,18 @@
     <title>Moderation Portal</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
-    <!-- Apple-style font stack -->
     <link rel="stylesheet" href="style.css">
-
-    <!-- Favicon -->
-    <link rel="icon" href="favicon.png" type="image/png">
+    <link rel="icon" href="favicon.png">
 </head>
 <body>
 
-<div class="background"></div>
+<canvas id="particles"></canvas>
 
 <div class="theme-toggle" onclick="toggleTheme()">
     <div class="toggle-circle"></div>
 </div>
 
-<div class="container fade-in">
+<div class="container" id="container">
     <h1>Moderation Records</h1>
 
     <div class="search-box">
