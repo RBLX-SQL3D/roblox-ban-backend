@@ -16,20 +16,7 @@ const {
   DISCORD_WEBHOOK
 } = process.env;
 
-/* ========================= */
-/* MULTI-GAME CONFIG */
-/* ========================= */
-
-const GAMES = {
-  GAME1: {
-    universeId: process.env.GAME1_UNIVERSE_ID,
-    apiKey: process.env.GAME1_ROBLOX_API_KEY
-  },
-  GAME2: {
-    universeId: process.env.GAME2_UNIVERSE_ID,
-    apiKey: process.env.GAME2_ROBLOX_API_KEY
-  }
-};
+const GAMES = JSON.parse(process.env.ROBLOX_GAMES_CONFIG || "{}");
 
 let banCache = new Map();
 
@@ -43,14 +30,13 @@ function phTime() {
   });
 }
 
-async function discordLog(title, description, color = 15158332) {
+async function discordLog(title, description) {
   if (!DISCORD_WEBHOOK) return;
-
   await axios.post(DISCORD_WEBHOOK, {
     embeds: [{
       title,
       description,
-      color,
+      color: 15158332,
       timestamp: new Date().toISOString()
     }]
   }).catch(()=>{});
@@ -60,21 +46,18 @@ async function discordLog(title, description, color = 15158332) {
 /* ROBLOX BAN API */
 /* ========================= */
 
-async function robloxBan(gameKey, userId, isPermanent, days = 60) {
-
+async function robloxBan(gameKey, userId, permanent, days = 60) {
   const game = GAMES[gameKey];
-  if (!game || !game.apiKey) return;
+  if (!game) return;
 
   const url = `https://apis.roblox.com/cloud/v2/universes/${game.universeId}/user-restrictions`;
 
   let body = {
     user: `users/${userId}`,
-    gameJoinRestriction: {
-      active: true
-    }
+    gameJoinRestriction: { active: true }
   };
 
-  if (!isPermanent) {
+  if (!permanent) {
     const expire = new Date();
     expire.setDate(expire.getDate() + days);
     body.gameJoinRestriction.expireTime = expire.toISOString();
@@ -85,19 +68,18 @@ async function robloxBan(gameKey, userId, isPermanent, days = 60) {
       "x-api-key": game.apiKey,
       "Content-Type": "application/json"
     }
-  }).catch(err => console.log("Roblox Ban Error:", err.message));
+  }).catch(()=>{});
 }
 
 async function robloxUnban(gameKey, userId) {
-
   const game = GAMES[gameKey];
-  if (!game || !game.apiKey) return;
+  if (!game) return;
 
   const url = `https://apis.roblox.com/cloud/v2/universes/${game.universeId}/user-restrictions/users/${userId}`;
 
   await axios.delete(url, {
     headers: { "x-api-key": game.apiKey }
-  }).catch(err => console.log("Roblox Unban Error:", err.message));
+  }).catch(()=>{});
 }
 
 /* ========================= */
@@ -105,9 +87,8 @@ async function robloxUnban(gameKey, userId) {
 /* ========================= */
 
 async function detectAndBanAlts(gameKey, mainUserId, cardId) {
-
   const game = GAMES[gameKey];
-  if (!game || !game.apiKey) return;
+  if (!game) return;
 
   try {
     const res = await axios.get(
@@ -118,7 +99,6 @@ async function detectAndBanAlts(gameKey, mainUserId, cardId) {
     const alts = res.data.linkedAccounts || [];
 
     for (const alt of alts) {
-
       await robloxBan(gameKey, alt.userId, false);
 
       await axios.post(
@@ -133,17 +113,14 @@ Time (PH): ${phTime()}`
       );
     }
 
-  } catch (err) {
-    console.log("Alt Detection Error:", err.message);
-  }
+  } catch {}
 }
 
 /* ========================= */
-/* CACHE SYSTEM */
+/* CACHE */
 /* ========================= */
 
 async function refreshCache() {
-
   banCache.clear();
 
   const res = await axios.get(
@@ -154,17 +131,15 @@ async function refreshCache() {
   for (const card of res.data) {
     const match = card.name.match(/\d+/);
     if (!match) continue;
-
     banCache.set(match[0], { cardId: card.id });
   }
 }
 
 /* ========================= */
-/* CREATE OR GET CARD */
+/* CARD MANAGEMENT */
 /* ========================= */
 
 async function getOrCreateCard(userId, username) {
-
   if (banCache.has(userId))
     return banCache.get(userId).cardId;
 
@@ -181,53 +156,78 @@ async function getOrCreateCard(userId, username) {
   return card.data.id;
 }
 
-/* ========================= */
-/* APPLY BAN */
-/* ========================= */
-
 async function applyBan(gameKey, cardId, userId, username, type) {
 
   const isPermanent = type === "perm";
 
-  let start = null;
-  let due = null;
-  let listId = isPermanent ? BANNED_LIST_ID : TEMP_BANNED_LIST_ID;
-  let duration = isPermanent ? "PERMANENT" : "60 Days";
-  let appealable = isPermanent ? "NO" : "YES";
+  const card = await axios.get(
+    `https://api.trello.com/1/cards/${cardId}`,
+    { params: { key: TRELLO_KEY, token: TRELLO_TOKEN } }
+  );
 
-  if (!isPermanent) {
+  let desc = card.data.desc || "";
+  const joinMatch = desc.match(/Join Attempts:\s*(\d+)/);
+  const attempts = joinMatch ? joinMatch[1] : "0";
+
+  if (isPermanent) {
+
+    const permTime = phTime();
+
+    const updatedDescription =
+`Profile: https://www.roblox.com/users/${userId}/profile
+Reason: EXPLOITING
+Duration: PERMANENT
+Appealable: NO
+Permanent Ban Issued: ${permTime}
+Join Attempts: ${attempts}`;
+
+    await axios.put(
+      `https://api.trello.com/1/cards/${cardId}`,
+      {
+        desc: updatedDescription,
+        idList: BANNED_LIST_ID,
+        start: null,
+        due: null
+      },
+      { params: { key: TRELLO_KEY, token: TRELLO_TOKEN } }
+    );
+
+    await robloxBan(gameKey, userId, true);
+
+  } else {
+
     const startDate = new Date();
     const dueDate = new Date();
     dueDate.setDate(startDate.getDate() + 60);
 
-    start = startDate.toISOString();
-    due = dueDate.toISOString();
+    const updatedDescription =
+`Profile: https://www.roblox.com/users/${userId}/profile
+Reason: Rule Violation
+Duration: 60 Days
+Appealable: YES
+Start Date: ${phTime()}
+Join Attempts: ${attempts}`;
+
+    await axios.put(
+      `https://api.trello.com/1/cards/${cardId}`,
+      {
+        desc: updatedDescription,
+        idList: TEMP_BANNED_LIST_ID,
+        start: startDate.toISOString(),
+        due: dueDate.toISOString()
+      },
+      { params: { key: TRELLO_KEY, token: TRELLO_TOKEN } }
+    );
+
+    await robloxBan(gameKey, userId, false);
   }
 
-  const description =
-`Profile: https://www.roblox.com/users/${userId}/profile
-Reason: ${isPermanent ? "EXPLOITING" : "Rule Violation"}
-Duration: ${duration}
-Appealable: ${appealable}
-Join Attempts: 0`;
-
-  await axios.put(
-    `https://api.trello.com/1/cards/${cardId}`,
-    { desc: description, idList: listId, start, due },
-    { params: { key: TRELLO_KEY, token: TRELLO_TOKEN } }
-  );
-
-  await robloxBan(gameKey, userId, isPermanent);
   await detectAndBanAlts(gameKey, userId, cardId);
-
-  await discordLog("Ban Issued",
-    `User: ${username}
-Duration: ${duration}
-Game: ${gameKey}`);
+  await discordLog("Ban Issued", `User: ${username}`);
 }
 
 /* ========================= */
-/* JOIN ATTEMPT */
+/* JOIN ATTEMPTS */
 /* ========================= */
 
 async function handleJoinAttempt(cardId) {
@@ -264,7 +264,7 @@ Time (PH): ${phTime()}`
 }
 
 /* ========================= */
-/* BAN ENDPOINT */
+/* ENDPOINTS */
 /* ========================= */
 
 app.post("/ban", async (req, res) => {
@@ -274,25 +274,12 @@ app.post("/ban", async (req, res) => {
   if (!userId || !username || !type || !game)
     return res.status(400).json({ error: "Missing data" });
 
-  try {
+  const cardId = await getOrCreateCard(userId, username);
+  await applyBan(game, cardId, userId, username, type);
+  await refreshCache();
 
-    const cardId = await getOrCreateCard(userId, username);
-
-    await applyBan(game, cardId, userId, username, type);
-
-    await refreshCache();
-
-    res.json({ success: true });
-
-  } catch (err) {
-    console.log("Ban Error:", err.message);
-    res.status(500).json({ error: "Ban failed" });
-  }
+  res.json({ success: true });
 });
-
-/* ========================= */
-/* CHECK BAN */
-/* ========================= */
 
 app.get("/checkban", async (req, res) => {
 
@@ -319,6 +306,7 @@ app.get("/checkban", async (req, res) => {
     );
 
     await refreshCache();
+
     return res.json({ banned: false });
   }
 
@@ -329,5 +317,5 @@ app.get("/checkban", async (req, res) => {
 
 app.listen(process.env.PORT || 3000, async () => {
   await refreshCache();
-  console.log("NOX Enterprise Multi-Game System Running");
+  console.log("NOX Enterprise Moderation Running");
 });
