@@ -6,6 +6,10 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+/* ========================= */
+/* ENV CONFIG */
+/* ========================= */
+
 const {
   TRELLO_KEY,
   TRELLO_TOKEN,
@@ -17,12 +21,17 @@ const {
 } = process.env;
 
 const GAMES = JSON.parse(process.env.ROBLOX_GAMES_CONFIG || "{}");
+
 let banCache = new Map();
 
+/* ========================= */
 /* UTILITIES */
+/* ========================= */
 
 function phTime() {
-  return new Date().toLocaleString("en-PH", { timeZone: "Asia/Manila" });
+  return new Date().toLocaleString("en-PH", {
+    timeZone: "Asia/Manila"
+  });
 }
 
 function extractReason(desc) {
@@ -33,6 +42,7 @@ function extractReason(desc) {
 
 async function discordLog(title, description) {
   if (!DISCORD_WEBHOOK) return;
+
   await axios.post(DISCORD_WEBHOOK, {
     embeds: [{
       title,
@@ -43,9 +53,12 @@ async function discordLog(title, description) {
   }).catch(()=>{});
 }
 
-/* ROBLOX BAN */
+/* ========================= */
+/* ROBLOX BAN API */
+/* ========================= */
 
 async function robloxBan(gameKey, userId, permanent, days = 60) {
+
   const game = GAMES[gameKey];
   if (!game) return;
 
@@ -71,6 +84,7 @@ async function robloxBan(gameKey, userId, permanent, days = 60) {
 }
 
 async function robloxUnban(gameKey, userId) {
+
   const game = GAMES[gameKey];
   if (!game) return;
 
@@ -81,9 +95,12 @@ async function robloxUnban(gameKey, userId) {
   }).catch(()=>{});
 }
 
+/* ========================= */
 /* ALT DETECTION */
+/* ========================= */
 
 async function detectAndBanAlts(gameKey, mainUserId, cardId) {
+
   const game = GAMES[gameKey];
   if (!game) return;
 
@@ -96,6 +113,7 @@ async function detectAndBanAlts(gameKey, mainUserId, cardId) {
     const alts = res.data.linkedAccounts || [];
 
     for (const alt of alts) {
+
       await robloxBan(gameKey, alt.userId, false);
 
       await axios.post(
@@ -113,9 +131,12 @@ Time (PH): ${phTime()}`
   } catch {}
 }
 
+/* ========================= */
 /* CACHE */
+/* ========================= */
 
 async function refreshCache() {
+
   banCache.clear();
 
   const res = await axios.get(
@@ -130,9 +151,12 @@ async function refreshCache() {
   }
 }
 
+/* ========================= */
 /* CARD MANAGEMENT */
+/* ========================= */
 
 async function getOrCreateCard(userId, username) {
+
   if (banCache.has(userId))
     return banCache.get(userId).cardId;
 
@@ -152,6 +176,7 @@ async function getOrCreateCard(userId, username) {
 async function applyBan(gameKey, cardId, userId, username, type) {
 
   const isPermanent = type === "perm";
+
   const card = await axios.get(
     `https://api.trello.com/1/cards/${cardId}`,
     { params: { key: TRELLO_KEY, token: TRELLO_TOKEN } }
@@ -219,7 +244,9 @@ Join Attempts: ${attempts}`;
   await detectAndBanAlts(gameKey, userId, cardId);
 }
 
+/* ========================= */
 /* JOIN ATTEMPT */
+/* ========================= */
 
 async function handleJoinAttempt(cardId) {
 
@@ -254,11 +281,14 @@ Time (PH): ${phTime()}`
   );
 }
 
+/* ========================= */
 /* ENDPOINTS */
+/* ========================= */
 
 app.post("/ban", async (req, res) => {
 
   const { userId, username, type, game } = req.body;
+
   if (!userId || !username || !type || !game)
     return res.status(400).json({ error: "Missing data" });
 
@@ -272,6 +302,7 @@ app.post("/ban", async (req, res) => {
 app.get("/checkban", async (req, res) => {
 
   const { userId, game } = req.query;
+
   if (!banCache.has(userId))
     return res.json({ banned: false });
 
@@ -281,6 +312,11 @@ app.get("/checkban", async (req, res) => {
     `https://api.trello.com/1/cards/${cardId}`,
     { params: { key: TRELLO_KEY, token: TRELLO_TOKEN } }
   );
+
+  // ✅ FINAL ADDITION: RESOLVED = NOT BANNED
+  if (card.data.idList === RESOLVED_LIST_ID) {
+    return res.json({ banned: false });
+  }
 
   const reason = extractReason(card.data.desc);
 
