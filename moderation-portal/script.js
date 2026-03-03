@@ -11,9 +11,9 @@ async function searchUser() {
     try {
         let userId = input;
 
-        // If username entered, convert to userId
+        // Convert username → userId if needed
         if (!/^\d+$/.test(input)) {
-            const res = await fetch(`https://users.roblox.com/v1/usernames/users`, {
+            const res = await fetch("https://users.roblox.com/v1/usernames/users", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
@@ -22,16 +22,23 @@ async function searchUser() {
                 })
             });
 
-            const data = await res.json();
-            if (!data.data.length) {
+            const userData = await res.json();
+
+            if (!userData.data || !userData.data.length) {
                 resultDiv.innerHTML = "User not found.";
                 return;
             }
 
-            userId = data.data[0].id;
+            userId = userData.data[0].id;
         }
 
+        // Call backend
         const response = await fetch(`${BACKEND}/search?userId=${userId}`);
+
+        if (!response.ok) {
+            throw new Error("Backend error");
+        }
+
         const data = await response.json();
 
         if (!data.found) {
@@ -39,32 +46,32 @@ async function searchUser() {
             return;
         }
 
-        const permanent = data.description?.toLowerCase().includes("permanent");
+        const isPermanent = data.duration.toLowerCase().includes("permanent");
 
         resultDiv.innerHTML = `
-            <img class="avatar" src="${data.avatar}" />
-            <h2>${data.username}</h2>
-            <p class="status ${permanent ? "permanent" : "temp"}">
-                ${permanent ? "Permanent Ban" : "Temporary Ban"}
-            </p>
-            <p><strong>Reason:</strong> ${extractReason(data.description)}</p>
-            <p><strong>Join Attempts:</strong> ${extractAttempts(data.description)}</p>
-            <p><a class="link" href="${data.profile}" target="_blank">View Roblox Profile</a></p>
+            <div class="card">
+                <img class="avatar" src="${data.avatar}" alt="Avatar">
+                <h2>${data.username}</h2>
+
+                <div class="status ${isPermanent ? "permanent" : "temporary"}">
+                    ${isPermanent ? "Permanent Ban" : data.duration}
+                </div>
+
+                <div class="details">
+                    <p><strong>Reason:</strong> ${data.reason}</p>
+                    <p><strong>Duration:</strong> ${data.duration}</p>
+                    <p><strong>Appealable:</strong> ${data.appealable}</p>
+                    <p><strong>Join Attempts:</strong> ${data.attempts}</p>
+                </div>
+
+                <a class="profile-link" href="${data.profile}" target="_blank">
+                    View Roblox Profile
+                </a>
+            </div>
         `;
 
-    } catch (err) {
+    } catch (error) {
+        console.error(error);
         resultDiv.innerHTML = "Error retrieving record.";
     }
-}
-
-function extractReason(desc) {
-    if (!desc) return "Not specified";
-    const match = desc.match(/Reason:\s*(.*)/);
-    return match ? match[1] : "Not specified";
-}
-
-function extractAttempts(desc) {
-    if (!desc) return "0";
-    const match = desc.match(/Join Attempts:\s*(\d+)/);
-    return match ? match[1] : "0";
 }
