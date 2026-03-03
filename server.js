@@ -15,6 +15,8 @@ const {
   RESOLVED_LIST_ID
 } = process.env;
 
+const GAMES = JSON.parse(process.env.ROBLOX_GAMES_CONFIG || "{}");
+
 let banCache = new Map();
 
 /* ================= TIME ================= */
@@ -81,7 +83,49 @@ Due Date: ${d["Due Date"] || "N/A"}
 Join Attempts: ${d["Join Attempts"]}`;
 }
 
-/* ================= CREATE ================= */
+/* ================= ROBLOX BAN API ================= */
+
+async function robloxBan(userId, gameKey, isPermanent) {
+  const game = GAMES[gameKey];
+  if (!game) return;
+
+  const url = `https://apis.roblox.com/cloud/v2/universes/${game.universeId}/bans`;
+
+  const payload = {
+    user: `users/${userId}`,
+    privateReason: "NOX Guard Enforcement",
+    displayReason: "You have been banned from this experience.",
+    duration: isPermanent ? "PERMANENT" : "P60D"
+  };
+
+  try {
+    await axios.post(url, payload, {
+      headers: {
+        "x-api-key": game.apiKey,
+        "Content-Type": "application/json"
+      }
+    });
+  } catch (err) {
+    console.log("Roblox Ban Error:", err.response?.data || err.message);
+  }
+}
+
+async function robloxUnban(userId, gameKey) {
+  const game = GAMES[gameKey];
+  if (!game) return;
+
+  const url = `https://apis.roblox.com/cloud/v2/universes/${game.universeId}/bans/users/${userId}`;
+
+  try {
+    await axios.delete(url, {
+      headers: { "x-api-key": game.apiKey }
+    });
+  } catch (err) {
+    console.log("Roblox Unban Error:", err.response?.data || err.message);
+  }
+}
+
+/* ================= CREATE CARD ================= */
 
 async function getOrCreateCard(userId, username) {
   if (banCache.has(userId))
@@ -113,7 +157,7 @@ Join Attempts: 0`,
 
 app.post("/ban", async (req, res) => {
 
-  const { userId, username, type } = req.body;
+  const { userId, username, type, gameKey = "GAME1" } = req.body;
   if (!userId || !username || !type)
     return res.status(400).json({ error: "Missing data" });
 
@@ -151,6 +195,8 @@ app.post("/ban", async (req, res) => {
       { params: { key: TRELLO_KEY, token: TRELLO_TOKEN } }
     );
 
+    await robloxBan(userId, gameKey, true);
+
   } else {
 
     updated.Duration = "60 Days";
@@ -168,6 +214,8 @@ app.post("/ban", async (req, res) => {
       },
       { params: { key: TRELLO_KEY, token: TRELLO_TOKEN } }
     );
+
+    await robloxBan(userId, gameKey, false);
   }
 
   await refreshCache();
@@ -194,8 +242,6 @@ app.get("/checkban", async (req, res) => {
 
   if (card.data.idList === RESOLVED_LIST_ID)
     return res.json({ banned: false });
-
-  /* AUTO EXPIRE TEMP BAN */
 
   if (card.data.idList === TEMP_BANNED_LIST_ID && card.data.due) {
     const due = new Date(card.data.due);
@@ -237,7 +283,8 @@ app.get("/checkban", async (req, res) => {
 
 app.post("/resolve", async (req, res) => {
 
-  const { userId } = req.body;
+  const { userId, gameKey = "GAME1" } = req.body;
+
   if (!banCache.has(userId))
     return res.status(404).json({ error: "Not found" });
 
@@ -248,6 +295,8 @@ app.post("/resolve", async (req, res) => {
     { idList: RESOLVED_LIST_ID, start: null, due: null },
     { params: { key: TRELLO_KEY, token: TRELLO_TOKEN } }
   );
+
+  await robloxUnban(userId, gameKey);
 
   await refreshCache();
   res.json({ success: true });
