@@ -17,15 +17,25 @@ const {
 
 let banCache = new Map();
 
-/* ====================== */
-/* UTIL */
-/* ====================== */
+/* ================= TIME ================= */
 
-function extractReason(desc) {
-  if (!desc) return "Not Specified";
-  const match = desc.match(/Reason:\s*(.*)/i);
-  return match ? match[1].trim() : "Not Specified";
+function phNow() {
+  return new Date().toLocaleString("en-PH", {
+    timeZone: "Asia/Manila"
+  });
 }
+
+function isoNow() {
+  return new Date().toISOString();
+}
+
+function isoPlus60Days() {
+  const d = new Date();
+  d.setDate(d.getDate() + 60);
+  return d.toISOString();
+}
+
+/* ================= CACHE ================= */
 
 async function refreshCache() {
   banCache.clear();
@@ -42,6 +52,34 @@ async function refreshCache() {
   }
 }
 
+/* ================= DESCRIPTION PARSE ================= */
+
+function parseDescription(desc) {
+  const lines = desc ? desc.split("\n") : [];
+  const data = {};
+
+  for (const line of lines) {
+    const parts = line.split(": ");
+    if (parts.length >= 2) {
+      data[parts[0].trim()] = parts.slice(1).join(": ").trim();
+    }
+  }
+
+  return data;
+}
+
+function buildDescription(data) {
+  return `Profile: ${data.Profile}
+Reason: ${data.Reason}
+Duration: ${data.Duration}
+Appealable: ${data.Appealable}
+Start Date: ${data["Start Date"] || "N/A"}
+Due Date: ${data["Due Date"] || "N/A"}
+Join Attempts: ${data["Join Attempts"]}`;
+}
+
+/* ================= CREATE / GET CARD ================= */
+
 async function getOrCreateCard(userId, username) {
 
   if (banCache.has(userId))
@@ -54,39 +92,79 @@ async function getOrCreateCard(userId, username) {
       idList: TEMP_BANNED_LIST_ID,
       desc: `Profile: https://www.roblox.com/users/${userId}/profile
 Reason: Not Specified
-Join Attempts: 0`
+Duration: 60 Days
+Appealable: YES
+Start Date: ${phNow()}
+Due Date: ${phNow()}
+Join Attempts: 0`,
+      start: isoNow(),
+      due: isoPlus60Days()
     },
     { params: { key: TRELLO_KEY, token: TRELLO_TOKEN } }
   );
 
+  await refreshCache();
   return card.data.id;
 }
 
-/* ====================== */
-/* BAN */
-/* ====================== */
+/* ================= BAN ================= */
 
 app.post("/ban", async (req, res) => {
 
   const { userId, username, type } = req.body;
-
   if (!userId || !username || !type)
     return res.status(400).json({ error: "Missing data" });
 
   const cardId = await getOrCreateCard(userId, username);
 
-  await refreshCache(); // fix for :pb issue
+  const cardRes = await axios.get(
+    `https://api.trello.com/1/cards/${cardId}`,
+    { params: { key: TRELLO_KEY, token: TRELLO_TOKEN } }
+  );
 
-  if (type === "perm") {
+  const existing = parseDescription(cardRes.data.desc);
+
+  const reason = existing.Reason || "Not Specified";
+
+  let updated = {
+    Profile: existing.Profile || `https://www.roblox.com/users/${userId}/profile`,
+    Reason: reason,
+    "Join Attempts": existing["Join Attempts"] || 0
+  };
+
+  if (type === "perm" || reason.toUpperCase() === "EXPLOITING") {
+
+    updated.Duration = "PERMANENT";
+    updated.Appealable = "NO";
+    updated["Start Date"] = `Permanently banned on ${phNow()}`;
+    updated["Due Date"] = "N/A";
+
     await axios.put(
       `https://api.trello.com/1/cards/${cardId}`,
-      { idList: BANNED_LIST_ID },
+      {
+        idList: BANNED_LIST_ID,
+        desc: buildDescription(updated),
+        start: null,
+        due: null
+      },
       { params: { key: TRELLO_KEY, token: TRELLO_TOKEN } }
     );
+
   } else {
+
+    updated.Duration = "60 Days";
+    updated.Appealable = "YES";
+    updated["Start Date"] = phNow();
+    updated["Due Date"] = phNow();
+
     await axios.put(
       `https://api.trello.com/1/cards/${cardId}`,
-      { idList: TEMP_BANNED_LIST_ID },
+      {
+        idList: TEMP_BANNED_LIST_ID,
+        desc: buildDescription(updated),
+        start: isoNow(),
+        due: isoPlus60Days()
+      },
       { params: { key: TRELLO_KEY, token: TRELLO_TOKEN } }
     );
   }
@@ -95,22 +173,23 @@ app.post("/ban", async (req, res) => {
   res.json({ success: true });
 });
 
-/* ====================== */
-/* RESOLVE */
-/* ====================== */
+/* ================= RESOLVE ================= */
 
 app.post("/resolve", async (req, res) => {
 
   const { userId } = req.body;
-
   if (!banCache.has(userId))
-    return res.status(404).json({ error: "Card not found" });
+    return res.status(404).json({ error: "Not found" });
 
   const { cardId } = banCache.get(userId);
 
   await axios.put(
     `https://api.trello.com/1/cards/${cardId}`,
-    { idList: RESOLVED_LIST_ID },
+    {
+      idList: RESOLVED_LIST_ID,
+      start: null,
+      due: null
+    },
     { params: { key: TRELLO_KEY, token: TRELLO_TOKEN } }
   );
 
@@ -118,9 +197,7 @@ app.post("/resolve", async (req, res) => {
   res.json({ success: true });
 });
 
-/* ====================== */
-/* CHECK BAN */
-/* ====================== */
+/* ================= CHECK BAN ================= */
 
 app.get("/checkban", async (req, res) => {
 
@@ -139,11 +216,26 @@ app.get("/checkban", async (req, res) => {
   if (card.data.idList === RESOLVED_LIST_ID)
     return res.json({ banned: false });
 
-  const reason = extractReason(card.data.desc);
+  const data = parseDescription(card.data.desc);
+
+  const attempts = parseInt(data["Join Attempts"] || "0") + 1;
+  data["Join Attempts"] = attempts;
+
+  await axios.put(
+    `https://api.trello.com/1/cards/${cardId}`,
+    { desc: buildDescription(data) },
+    { params: { key: TRELLO_KEY, token: TRELLO_TOKEN } }
+  );
+
+  await axios.post(
+    `https://api.trello.com/1/cards/${cardId}/actions/comments`,
+    { text: `Attempted to join: ${phNow()}` },
+    { params: { key: TRELLO_KEY, token: TRELLO_TOKEN } }
+  );
 
   return res.json({
     banned: true,
-    reason: reason
+    reason: data.Reason
   });
 });
 
