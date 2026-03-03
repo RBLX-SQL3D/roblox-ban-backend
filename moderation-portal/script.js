@@ -1,4 +1,4 @@
-const BACKEND = "hhttps://roblox-ban-backend.onrender.com";
+const BACKEND = "https://roblox-ban-backend.onrender.com";
 
 async function searchUser() {
     const input = document.getElementById("searchInput").value.trim();
