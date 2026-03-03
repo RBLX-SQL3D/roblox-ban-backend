@@ -7,24 +7,26 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-/* ============================= */
-/* ENV VARIABLES */
-/* ============================= */
+/* ========================= */
+/* ENV CONFIG */
+/* ========================= */
 
 const TRELLO_KEY = process.env.TRELLO_KEY;
 const TRELLO_TOKEN = process.env.TRELLO_TOKEN;
 const BANNED_LIST_ID = process.env.BANNED_LIST_ID;
 const DISCORD_WEBHOOK = process.env.DISCORD_WEBHOOK;
+const ROBLOX_API_KEY = process.env.ROBLOX_API_KEY;
+const ROBLOX_UNIVERSE_ID = process.env.ROBLOX_UNIVERSE_ID;
 
-/* ============================= */
+/* ========================= */
 /* CACHE */
-/* ============================= */
+/* ========================= */
 
 let banCache = new Map();
 
-/* ============================= */
+/* ========================= */
 /* UTILITIES */
-/* ============================= */
+/* ========================= */
 
 function getPHTime() {
     return new Date().toLocaleString("en-PH", {
@@ -40,7 +42,7 @@ async function getRobloxUser(userId) {
 async function getRobloxAvatar(userId) {
     try {
         const response = await axios.get(
-            `https://thumbnails.roblox.com/v1/users/avatar-headshot`,
+            "https://thumbnails.roblox.com/v1/users/avatar-headshot",
             {
                 params: {
                     userIds: userId,
@@ -61,9 +63,9 @@ async function logToDiscord(message) {
     await axios.post(DISCORD_WEBHOOK, { content: message });
 }
 
-/* ============================= */
-/* TRELLO SYNC */
-/* ============================= */
+/* ========================= */
+/* TRELO CACHE SYNC */
+/* ========================= */
 
 async function refreshBanCache() {
     const response = await axios.get(
@@ -77,6 +79,7 @@ async function refreshBanCache() {
 
     for (const card of response.data) {
         const userId = card.name.split("|")[0].trim();
+
         banCache.set(userId, {
             cardId: card.id,
             description: card.desc
@@ -86,57 +89,79 @@ async function refreshBanCache() {
     console.log("Ban cache refreshed:", banCache.size);
 }
 
-/* ============================= */
-/* SEARCH API (For Website) */
-/* ============================= */
+/* ========================= */
+/* SEARCH (Website API) */
+/* ========================= */
 
 app.get("/search", async (req, res) => {
-    const userId = req.query.userId;
-    if (!userId) return res.json({ found: false });
+    let { userId, username } = req.query;
 
-    const record = banCache.get(userId);
-    if (!record) return res.json({ found: false });
+    try {
+        // Convert username → userId if needed
+        if (!userId && username) {
+            const usernameRes = await axios.post(
+                "https://users.roblox.com/v1/usernames/users",
+                {
+                    usernames: [username],
+                    excludeBannedUsers: false
+                }
+            );
 
-    const user = await getRobloxUser(userId);
-    const avatar = await getRobloxAvatar(userId);
+            if (!usernameRes.data.data.length) {
+                return res.json({ found: false });
+            }
 
-    return res.json({
-        found: true,
-        username: user.name,
-        avatar,
-        profile: `https://www.roblox.com/users/${userId}/profile`,
-        reason: extractReason(record.description),
-        duration: extractDuration(record.description),
-        appealable: extractAppealable(record.description),
-        attempts: extractAttempts(record.description)
-    });
+            userId = usernameRes.data.data[0].id;
+        }
+
+        if (!userId) return res.json({ found: false });
+
+        const record = banCache.get(userId);
+        if (!record) return res.json({ found: false });
+
+        const user = await getRobloxUser(userId);
+        const avatar = await getRobloxAvatar(userId);
+
+        return res.json({
+            found: true,
+            username: user.name,
+            avatar,
+            profile: `https://www.roblox.com/users/${userId}/profile`,
+            reason: extractReason(record.description),
+            duration: extractDuration(record.description),
+            appealable: extractAppealable(record.description),
+            attempts: extractAttempts(record.description)
+        });
+
+    } catch (err) {
+        console.log("Search error:", err.message);
+        res.status(500).json({ found: false });
+    }
 });
 
-/* ============================= */
-/* CHECK BAN + JOIN TRACKING */
-/* ============================= */
+/* ========================= */
+/* CHECK BAN + AUTO ALT BAN */
+/* ========================= */
 
 app.get("/checkban", async (req, res) => {
-    const userId = req.query.userId;
-    const linkedMainId = req.query.mainId; // optional
+    const { userId, mainId } = req.query;
 
     if (!userId) return res.json({ permanent: false });
 
     const record = banCache.get(userId);
 
-    // If user is banned
+    // Main banned
     if (record) {
         await logJoinAttempt(userId, record.cardId, "MAIN");
         return res.json({ permanent: true });
     }
 
-    // If alt linked to banned main
-    if (linkedMainId && banCache.has(linkedMainId)) {
-        const mainRecord = banCache.get(linkedMainId);
+    // Alt of banned main
+    if (mainId && banCache.has(mainId)) {
+        const mainRecord = banCache.get(mainId);
 
         await logJoinAttempt(userId, mainRecord.cardId, "ALT");
 
-        // AUTO BAN ALT (Roblox API)
         await autoBanAlt(userId);
 
         return res.json({ permanent: true });
@@ -145,9 +170,9 @@ app.get("/checkban", async (req, res) => {
     return res.json({ permanent: false });
 });
 
-/* ============================= */
-/* JOIN ATTEMPT LOGGER */
-/* ============================= */
+/* ========================= */
+/* JOIN ATTEMPT LOGGING */
+/* ========================= */
 
 async function logJoinAttempt(userId, cardId, type) {
     const timestamp = getPHTime();
@@ -166,11 +191,11 @@ Profile: ${profileLink}
     );
 
     await incrementAttemptCounter(cardId);
-}
 
-/* ============================= */
-/* INCREMENT ATTEMPT COUNTER */
-/* ============================= */
+    await logToDiscord(
+        `Join Attempt (${type})\nUserId: ${userId}\nTime: ${timestamp}`
+    );
+}
 
 async function incrementAttemptCounter(cardId) {
     const card = await axios.get(
@@ -182,7 +207,11 @@ async function incrementAttemptCounter(cardId) {
     let attempts = extractAttempts(desc);
     attempts++;
 
-    desc = desc.replace(/Join Attempts:\s*\d+/, `Join Attempts: ${attempts}`);
+    if (/Join Attempts:\s*\d+/.test(desc)) {
+        desc = desc.replace(/Join Attempts:\s*\d+/, `Join Attempts: ${attempts}`);
+    } else {
+        desc += `\nJoin Attempts: ${attempts}`;
+    }
 
     await axios.put(
         `https://api.trello.com/1/cards/${cardId}`,
@@ -191,14 +220,16 @@ async function incrementAttemptCounter(cardId) {
     );
 }
 
-/* ============================= */
+/* ========================= */
 /* AUTO BAN ALT */
-/* ============================= */
+/* ========================= */
 
 async function autoBanAlt(userId) {
+    if (!ROBLOX_API_KEY || !ROBLOX_UNIVERSE_ID) return;
+
     try {
         await axios.post(
-            `https://apis.roblox.com/cloud/v2/universes/YOUR_UNIVERSE_ID/bans`,
+            `https://apis.roblox.com/cloud/v2/universes/${ROBLOX_UNIVERSE_ID}/bans`,
             {
                 userId: userId,
                 duration: "P9999D",
@@ -206,18 +237,21 @@ async function autoBanAlt(userId) {
             },
             {
                 headers: {
-                    "x-api-key": process.env.ROBLOX_API_KEY
+                    "x-api-key": ROBLOX_API_KEY
                 }
             }
         );
+
+        console.log("Alt auto-banned:", userId);
+
     } catch (err) {
-        console.log("Alt auto-ban failed:", err.response?.data || err.message);
+        console.log("Alt ban failed:", err.response?.data || err.message);
     }
 }
 
-/* ============================= */
+/* ========================= */
 /* DESCRIPTION PARSERS */
-/* ============================= */
+/* ========================= */
 
 function extractReason(desc) {
     const match = desc.match(/Reason:\s*(.*)/);
@@ -239,18 +273,18 @@ function extractAttempts(desc) {
     return match ? parseInt(match[1]) : 0;
 }
 
-/* ============================= */
+/* ========================= */
 /* WEBHOOK */
-/* ============================= */
+/* ========================= */
 
 app.post("/webhook", async (req, res) => {
     await refreshBanCache();
     res.sendStatus(200);
 });
 
-/* ============================= */
+/* ========================= */
 /* SERVER START */
-/* ============================= */
+/* ========================= */
 
 const PORT = process.env.PORT || 3000;
 
