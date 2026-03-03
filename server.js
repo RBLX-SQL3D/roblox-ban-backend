@@ -59,7 +59,7 @@ async function logToDiscord(message) {
     await axios.post(DISCORD_WEBHOOK, { content: message });
 }
 
-aapp.get("/webhook", (req, res) => {
+app.get("/webhook", (req, res) => {
     res.status(200).send("Webhook ready");
 });
 
