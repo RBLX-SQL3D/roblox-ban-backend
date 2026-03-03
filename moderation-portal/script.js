@@ -1,44 +1,37 @@
 const BACKEND = "https://roblox-ban-backend.onrender.com";
 
+function toggleTheme() {
+    document.body.classList.toggle("light");
+}
+
 async function searchUser() {
     const input = document.getElementById("searchInput").value.trim();
     if (!input) return;
 
     const resultDiv = document.getElementById("result");
     resultDiv.classList.remove("hidden");
-    resultDiv.innerHTML = "Searching...";
+    resultDiv.innerHTML = `<div class="spinner"></div>`;
 
     try {
         let userId = input;
 
-        // Convert username → userId if needed
         if (!/^\d+$/.test(input)) {
             const res = await fetch("https://users.roblox.com/v1/usernames/users", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    usernames: [input],
-                    excludeBannedUsers: false
-                })
+                body: JSON.stringify({ usernames: [input] })
             });
 
-            const userData = await res.json();
-
-            if (!userData.data || !userData.data.length) {
+            const data = await res.json();
+            if (!data.data.length) {
                 resultDiv.innerHTML = "User not found.";
                 return;
             }
 
-            userId = userData.data[0].id;
+            userId = data.data[0].id;
         }
 
-        // Call backend
         const response = await fetch(`${BACKEND}/search?userId=${userId}`);
-
-        if (!response.ok) {
-            throw new Error("Backend error");
-        }
-
         const data = await response.json();
 
         if (!data.found) {
@@ -49,29 +42,21 @@ async function searchUser() {
         const isPermanent = data.duration.toLowerCase().includes("permanent");
 
         resultDiv.innerHTML = `
-            <div class="card">
-                <img class="avatar" src="${data.avatar}" alt="Avatar">
+            <div class="card ${isPermanent ? "permanent" : "temporary"}">
+                <img class="avatar" src="${data.avatar}">
                 <h2>${data.username}</h2>
-
                 <div class="status ${isPermanent ? "permanent" : "temporary"}">
-                    ${isPermanent ? "Permanent Ban" : data.duration}
+                    ${data.duration}
                 </div>
-
-                <div class="details">
-                    <p><strong>Reason:</strong> ${data.reason}</p>
-                    <p><strong>Duration:</strong> ${data.duration}</p>
-                    <p><strong>Appealable:</strong> ${data.appealable}</p>
-                    <p><strong>Join Attempts:</strong> ${data.attempts}</p>
-                </div>
-
+                <p><strong>Reason:</strong> ${data.reason}</p>
+                <p><strong>Appealable:</strong> ${data.appealable}</p>
+                <p><strong>Join Attempts:</strong> ${data.attempts}</p>
                 <a class="profile-link" href="${data.profile}" target="_blank">
                     View Roblox Profile
                 </a>
             </div>
         `;
-
-    } catch (error) {
-        console.error(error);
+    } catch {
         resultDiv.innerHTML = "Error retrieving record.";
     }
 }
