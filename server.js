@@ -3,13 +3,8 @@ const axios = require("axios");
 const cors = require("cors");
 
 const app = express();
-
 app.use(cors());
 app.use(express.json());
-
-/* ========================= */
-/* ENV CONFIG */
-/* ========================= */
 
 const {
     TRELLO_KEY,
@@ -21,10 +16,12 @@ const {
 } = process.env;
 
 /* ========================= */
-/* CACHE */
+/* CACHES */
 /* ========================= */
 
 let banCache = new Map();
+let userCache = new Map();        // userId → response
+let usernameCache = new Map();    // username → userId
 
 /* ========================= */
 /* UTILITIES */
@@ -36,209 +33,193 @@ function getPHTime() {
     });
 }
 
-async function getRobloxUser(userId) {
-    const res = await axios.get(
-        `https://users.roblox.com/v1/users/${userId}`
-    );
-    return res.data;
-}
-
-async function getRobloxAvatar(userId) {
-    try {
-        const response = await axios.get(
-            "https://thumbnails.roblox.com/v1/users/avatar-headshot",
-            {
-                params: {
-                    userIds: userId,
-                    size: "150x150",
-                    format: "Png",
-                    isCircular: false
-                }
-            }
-        );
-        return response.data.data[0].imageUrl;
-    } catch {
-        return null;
-    }
-}
-
-async function logToDiscord(message) {
-    if (!DISCORD_WEBHOOK) return;
-    await axios.post(DISCORD_WEBHOOK, { content: message });
-}
-
 /* ========================= */
-/* TRELO CACHE SYNC */
+/* TRELL0 CACHE */
 /* ========================= */
 
 async function refreshBanCache() {
-    const response = await axios.get(
-        `https://api.trello.com/1/lists/${BANNED_LIST_ID}/cards`,
-        {
-            params: { key: TRELLO_KEY, token: TRELLO_TOKEN }
+    try {
+        const response = await axios.get(
+            `https://api.trello.com/1/lists/${BANNED_LIST_ID}/cards`,
+            {
+                params: { key: TRELLO_KEY, token: TRELLO_TOKEN }
+            }
+        );
+
+        banCache.clear();
+
+        for (const card of response.data) {
+            const match = card.name.match(/\d+/);
+            if (!match) continue;
+
+            const userId = String(match[0]);
+
+            banCache.set(userId, {
+                cardId: card.id,
+                description: card.desc
+            });
         }
-    );
 
-    banCache.clear();
-
-    for (const card of response.data) {
-        const userId = String(card.name.split("|")[0].trim());
-
-        banCache.set(userId, {
-            cardId: card.id,
-            description: card.desc
-        });
+        console.log("Ban cache refreshed:", banCache.size);
+    } catch (err) {
+        console.log("Trello refresh failed:", err.message);
     }
-
-    console.log("Ban cache refreshed:", banCache.size);
 }
 
 /* ========================= */
-/* SEARCH (Website API) */
+/* SEARCH */
 /* ========================= */
 
 app.get("/search", async (req, res) => {
     let { userId, username } = req.query;
 
     try {
-        /* Convert username → userId */
+        // ID direct search
         if (!userId && username) {
-            const usernameRes = await axios.post(
-                "https://users.roblox.com/v1/usernames/users",
-                {
-                    usernames: [username],
-                    excludeBannedUsers: false
-                },
-                {
-                    headers: { "Content-Type": "application/json" }
+            if (usernameCache.has(username.toLowerCase())) {
+                userId = usernameCache.get(username.toLowerCase());
+            } else {
+                const robloxRes = await axios.post(
+                    "https://users.roblox.com/v1/usernames/users",
+                    {
+                        usernames: [username],
+                        excludeBannedUsers: false
+                    },
+                    { headers: { "Content-Type": "application/json" } }
+                );
+
+                if (!robloxRes.data.data.length) {
+                    return res.json({ found: false });
                 }
-            );
 
-            if (
-                !usernameRes.data ||
-                !usernameRes.data.data ||
-                !usernameRes.data.data.length
-            ) {
-                return res.json({ found: false });
+                userId = String(robloxRes.data.data[0].id);
+                usernameCache.set(username.toLowerCase(), userId);
             }
-
-            userId = String(usernameRes.data.data[0].id);
         }
 
         if (!userId) return res.json({ found: false });
 
         userId = String(userId);
 
+        if (userCache.has(userId)) {
+            return res.json(userCache.get(userId));
+        }
+
         const record = banCache.get(userId);
         if (!record) return res.json({ found: false });
 
-        const user = await getRobloxUser(userId);
-        const avatar = await getRobloxAvatar(userId);
+        // PARALLEL ROBLOX CALLS
+        const [userRes, avatarRes] = await Promise.all([
+            axios.get(`https://users.roblox.com/v1/users/${userId}`),
+            axios.get(
+                "https://thumbnails.roblox.com/v1/users/avatar-headshot",
+                {
+                    params: {
+                        userIds: userId,
+                        size: "150x150",
+                        format: "Png",
+                        isCircular: false
+                    }
+                }
+            )
+        ]);
 
-        return res.json({
+        const avatar = avatarRes.data.data[0]?.imageUrl;
+
+        const responseData = {
             found: true,
-            username: user.name,
+            username: userRes.data.name,
             avatar,
             profile: `https://www.roblox.com/users/${userId}/profile`,
             reason: extractReason(record.description),
             duration: extractDuration(record.description),
             appealable: extractAppealable(record.description),
             attempts: extractAttempts(record.description)
-        });
+        };
+
+        userCache.set(userId, responseData);
+
+        return res.json(responseData);
 
     } catch (err) {
-        console.log("Search error:", err.response?.data || err.message);
+        console.log("Search error:", err.message);
         res.status(500).json({ found: false });
     }
 });
 
 /* ========================= */
-/* CHECK BAN + ALT AUTO BAN */
+/* CHECKBAN */
 /* ========================= */
 
 app.get("/checkban", async (req, res) => {
     let { userId, mainId } = req.query;
-
     if (!userId) return res.json({ permanent: false });
 
     userId = String(userId);
 
     const record = banCache.get(userId);
 
-    /* MAIN banned */
     if (record) {
-        await logJoinAttempt(userId, record.cardId, "MAIN");
+        logJoinAttempt(userId, record.cardId, "MAIN");
         return res.json({ permanent: true });
     }
 
-    /* ALT of banned main */
     if (mainId && banCache.has(String(mainId))) {
         const mainRecord = banCache.get(String(mainId));
-
-        await logJoinAttempt(userId, mainRecord.cardId, "ALT");
-
-        await autoBanAlt(userId);
-
+        logJoinAttempt(userId, mainRecord.cardId, "ALT");
+        autoBanAlt(userId);
         return res.json({ permanent: true });
     }
 
-    return res.json({ permanent: false });
+    res.json({ permanent: false });
 });
 
 /* ========================= */
-/* JOIN ATTEMPT LOGGING */
+/* JOIN LOG */
 /* ========================= */
 
 async function logJoinAttempt(userId, cardId, type) {
     const timestamp = getPHTime();
-    const profileLink = `https://www.roblox.com/users/${userId}/profile`;
 
     const comment = `
 Attempted to join (${type})
 Time (PH): ${timestamp}
-Profile: ${profileLink}
+Profile: https://www.roblox.com/users/${userId}/profile
 `;
 
-    await axios.post(
-        `https://api.trello.com/1/cards/${cardId}/actions/comments`,
-        { text: comment },
-        { params: { key: TRELLO_KEY, token: TRELLO_TOKEN } }
-    );
+    try {
+        await axios.post(
+            `https://api.trello.com/1/cards/${cardId}/actions/comments`,
+            { text: comment },
+            { params: { key: TRELLO_KEY, token: TRELLO_TOKEN } }
+        );
 
-    await incrementAttemptCounter(cardId);
-
-    await logToDiscord(
-        `Join Attempt (${type})\nUserId: ${userId}\nTime: ${timestamp}`
-    );
-}
-
-async function incrementAttemptCounter(cardId) {
-    const card = await axios.get(
-        `https://api.trello.com/1/cards/${cardId}`,
-        { params: { key: TRELLO_KEY, token: TRELLO_TOKEN } }
-    );
-
-    let desc = card.data.desc;
-    let attempts = extractAttempts(desc) + 1;
-
-    if (/Join Attempts:\s*\d+/.test(desc)) {
-        desc = desc.replace(/Join Attempts:\s*\d+/, `Join Attempts: ${attempts}`);
-    } else {
-        desc += `\nJoin Attempts: ${attempts}`;
+        console.log("Join attempt logged");
+    } catch (err) {
+        console.log("Join log failed:", err.message);
     }
-
-    await axios.put(
-        `https://api.trello.com/1/cards/${cardId}`,
-        { desc },
-        { params: { key: TRELLO_KEY, token: TRELLO_TOKEN } }
-    );
-
-    /* Update cache */
-    banCache.get(card.data.name.split("|")[0].trim()).description = desc;
 }
 
 /* ========================= */
-/* AUTO BAN ALT */
+/* WEBHOOK FIX */
+/* ========================= */
+
+app.get("/webhook", (req, res) => {
+    res.status(200).send("OK");
+});
+
+app.head("/webhook", (req, res) => {
+    res.sendStatus(200);
+});
+
+app.post("/webhook", async (req, res) => {
+    console.log("Webhook triggered");
+    refreshBanCache(); // non-blocking
+    res.sendStatus(200);
+});
+
+/* ========================= */
+/* ALT BAN */
 /* ========================= */
 
 async function autoBanAlt(userId) {
@@ -250,19 +231,14 @@ async function autoBanAlt(userId) {
             {
                 userId: Number(userId),
                 duration: "P9999D",
-                reason: "Linked to permanently banned account"
+                reason: "Linked to banned account"
             },
-            {
-                headers: {
-                    "x-api-key": ROBLOX_API_KEY
-                }
-            }
+            { headers: { "x-api-key": ROBLOX_API_KEY } }
         );
 
-        console.log("Alt auto-banned:", userId);
-
+        console.log("Alt auto-banned");
     } catch (err) {
-        console.log("Alt ban failed:", err.response?.data || err.message);
+        console.log("Alt ban failed:", err.message);
     }
 }
 
@@ -271,41 +247,32 @@ async function autoBanAlt(userId) {
 /* ========================= */
 
 function extractReason(desc) {
-    const match = desc.match(/Reason:\s*(.*)/);
-    return match ? match[1] : "Not specified";
+    const m = desc.match(/Reason:\s*(.*)/);
+    return m ? m[1] : "Not specified";
 }
 
 function extractDuration(desc) {
-    const match = desc.match(/Duration:\s*(.*)/);
-    return match ? match[1] : "Permanent";
+    const m = desc.match(/Duration:\s*(.*)/);
+    return m ? m[1] : "Permanent";
 }
 
 function extractAppealable(desc) {
-    const match = desc.match(/Appealable:\s*(.*)/);
-    return match ? match[1] : "No";
+    const m = desc.match(/Appealable:\s*(.*)/);
+    return m ? m[1] : "No";
 }
 
 function extractAttempts(desc) {
-    const match = desc.match(/Join Attempts:\s*(\d+)/);
-    return match ? parseInt(match[1]) : 0;
+    const m = desc.match(/Join Attempts:\s*(\d+)/);
+    return m ? parseInt(m[1]) : 0;
 }
 
 /* ========================= */
-/* WEBHOOK */
-/* ========================= */
-
-app.post("/webhook", async (req, res) => {
-    await refreshBanCache();
-    res.sendStatus(200);
-});
-
-/* ========================= */
-/* START SERVER */
+/* START */
 /* ========================= */
 
 const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, async () => {
-    console.log("Server running on port", PORT);
+    console.log("Server running");
     await refreshBanCache();
 });
