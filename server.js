@@ -16,6 +16,21 @@ const {
   DISCORD_WEBHOOK
 } = process.env;
 
+/* ========================= */
+/* MULTI-GAME CONFIG */
+/* ========================= */
+
+const GAMES = {
+  GAME1: {
+    universeId: process.env.GAME1_UNIVERSE_ID,
+    apiKey: process.env.GAME1_ROBLOX_API_KEY
+  },
+  GAME2: {
+    universeId: process.env.GAME2_UNIVERSE_ID,
+    apiKey: process.env.GAME2_ROBLOX_API_KEY
+  }
+};
+
 let banCache = new Map();
 
 /* ========================= */
@@ -42,10 +57,93 @@ async function discordLog(title, description, color = 15158332) {
 }
 
 /* ========================= */
-/* REFRESH BOARD CACHE */
+/* ROBLOX BAN API */
+/* ========================= */
+
+async function robloxBan(gameKey, userId, isPermanent, days = 60) {
+
+  const game = GAMES[gameKey];
+  if (!game || !game.apiKey) return;
+
+  const url = `https://apis.roblox.com/cloud/v2/universes/${game.universeId}/user-restrictions`;
+
+  let body = {
+    user: `users/${userId}`,
+    gameJoinRestriction: {
+      active: true
+    }
+  };
+
+  if (!isPermanent) {
+    const expire = new Date();
+    expire.setDate(expire.getDate() + days);
+    body.gameJoinRestriction.expireTime = expire.toISOString();
+  }
+
+  await axios.post(url, body, {
+    headers: {
+      "x-api-key": game.apiKey,
+      "Content-Type": "application/json"
+    }
+  }).catch(err => console.log("Roblox Ban Error:", err.message));
+}
+
+async function robloxUnban(gameKey, userId) {
+
+  const game = GAMES[gameKey];
+  if (!game || !game.apiKey) return;
+
+  const url = `https://apis.roblox.com/cloud/v2/universes/${game.universeId}/user-restrictions/users/${userId}`;
+
+  await axios.delete(url, {
+    headers: { "x-api-key": game.apiKey }
+  }).catch(err => console.log("Roblox Unban Error:", err.message));
+}
+
+/* ========================= */
+/* ALT DETECTION */
+/* ========================= */
+
+async function detectAndBanAlts(gameKey, mainUserId, cardId) {
+
+  const game = GAMES[gameKey];
+  if (!game || !game.apiKey) return;
+
+  try {
+    const res = await axios.get(
+      `https://apis.roblox.com/experimental/ban/v1/users/${mainUserId}/linked-accounts`,
+      { headers: { "x-api-key": game.apiKey } }
+    );
+
+    const alts = res.data.linkedAccounts || [];
+
+    for (const alt of alts) {
+
+      await robloxBan(gameKey, alt.userId, false);
+
+      await axios.post(
+        `https://api.trello.com/1/cards/${cardId}/actions/comments`,
+        {
+          text: `ALT DETECTED & BANNED
+Username: ${alt.username}
+UserId: ${alt.userId}
+Time (PH): ${phTime()}`
+        },
+        { params: { key: TRELLO_KEY, token: TRELLO_TOKEN } }
+      );
+    }
+
+  } catch (err) {
+    console.log("Alt Detection Error:", err.message);
+  }
+}
+
+/* ========================= */
+/* CACHE SYSTEM */
 /* ========================= */
 
 async function refreshCache() {
+
   banCache.clear();
 
   const res = await axios.get(
@@ -57,10 +155,7 @@ async function refreshCache() {
     const match = card.name.match(/\d+/);
     if (!match) continue;
 
-    banCache.set(match[0], {
-      cardId: card.id,
-      listId: card.idList
-    });
+    banCache.set(match[0], { cardId: card.id });
   }
 }
 
@@ -70,9 +165,8 @@ async function refreshCache() {
 
 async function getOrCreateCard(userId, username) {
 
-  if (banCache.has(userId)) {
+  if (banCache.has(userId))
     return banCache.get(userId).cardId;
-  }
 
   const card = await axios.post(
     "https://api.trello.com/1/cards",
@@ -91,16 +185,15 @@ async function getOrCreateCard(userId, username) {
 /* APPLY BAN */
 /* ========================= */
 
-async function applyBan(cardId, userId, username, type) {
+async function applyBan(gameKey, cardId, userId, username, type) {
 
   const isPermanent = type === "perm";
 
   let start = null;
   let due = null;
   let listId = isPermanent ? BANNED_LIST_ID : TEMP_BANNED_LIST_ID;
-  let duration = "PERMANENT";
-  let appealable = "NO";
-  let reason = isPermanent ? "EXPLOITING" : "Rule Violation";
+  let duration = isPermanent ? "PERMANENT" : "60 Days";
+  let appealable = isPermanent ? "NO" : "YES";
 
   if (!isPermanent) {
     const startDate = new Date();
@@ -109,13 +202,11 @@ async function applyBan(cardId, userId, username, type) {
 
     start = startDate.toISOString();
     due = dueDate.toISOString();
-    duration = "60 Days";
-    appealable = "YES";
   }
 
   const description =
 `Profile: https://www.roblox.com/users/${userId}/profile
-Reason: ${reason}
+Reason: ${isPermanent ? "EXPLOITING" : "Rule Violation"}
 Duration: ${duration}
 Appealable: ${appealable}
 Join Attempts: 0`;
@@ -126,10 +217,13 @@ Join Attempts: 0`;
     { params: { key: TRELLO_KEY, token: TRELLO_TOKEN } }
   );
 
-  await discordLog(
-    "Ban Updated",
-    `User: ${username}\nDuration: ${duration}`
-  );
+  await robloxBan(gameKey, userId, isPermanent);
+  await detectAndBanAlts(gameKey, userId, cardId);
+
+  await discordLog("Ban Issued",
+    `User: ${username}
+Duration: ${duration}
+Game: ${gameKey}`);
 }
 
 /* ========================= */
@@ -144,26 +238,26 @@ async function handleJoinAttempt(cardId) {
   );
 
   const desc = card.data.desc || "";
-
   const match = desc.match(/Join Attempts:\s*(\d+)/);
   let attempts = match ? parseInt(match[1]) : 0;
   attempts++;
 
-  const updatedDesc = desc.replace(
+  const updated = desc.replace(
     /Join Attempts:\s*\d+/,
     `Join Attempts: ${attempts}`
   );
 
   await axios.put(
     `https://api.trello.com/1/cards/${cardId}`,
-    { desc: updatedDesc },
+    { desc: updated },
     { params: { key: TRELLO_KEY, token: TRELLO_TOKEN } }
   );
 
   await axios.post(
     `https://api.trello.com/1/cards/${cardId}/actions/comments`,
     {
-      text: `Attempted to join\nTime (PH): ${phTime()}`
+      text: `Attempted to join
+Time (PH): ${phTime()}`
     },
     { params: { key: TRELLO_KEY, token: TRELLO_TOKEN } }
   );
@@ -175,33 +269,34 @@ async function handleJoinAttempt(cardId) {
 
 app.post("/ban", async (req, res) => {
 
-  const { userId, username, type } = req.body;
+  const { userId, username, type, game } = req.body;
 
-  if (!userId || !username || !type)
+  if (!userId || !username || !type || !game)
     return res.status(400).json({ error: "Missing data" });
 
   try {
 
     const cardId = await getOrCreateCard(userId, username);
-    await applyBan(cardId, userId, username, type);
+
+    await applyBan(game, cardId, userId, username, type);
+
     await refreshCache();
 
     res.json({ success: true });
 
   } catch (err) {
-    console.log(err.message);
+    console.log("Ban Error:", err.message);
     res.status(500).json({ error: "Ban failed" });
   }
 });
 
 /* ========================= */
-/* CHECKBAN */
+/* CHECK BAN */
 /* ========================= */
 
 app.get("/checkban", async (req, res) => {
 
-  const { userId } = req.query;
-  if (!userId) return res.json({ banned: false });
+  const { userId, game } = req.query;
 
   if (!banCache.has(userId))
     return res.json({ banned: false });
@@ -214,6 +309,8 @@ app.get("/checkban", async (req, res) => {
   );
 
   if (card.data.due && new Date() > new Date(card.data.due)) {
+
+    await robloxUnban(game, userId);
 
     await axios.put(
       `https://api.trello.com/1/cards/${cardId}`,
@@ -230,9 +327,7 @@ app.get("/checkban", async (req, res) => {
   return res.json({ banned: true });
 });
 
-/* ========================= */
-
 app.listen(process.env.PORT || 3000, async () => {
   await refreshCache();
-  console.log("NOX Moderation Backend Running");
+  console.log("NOX Enterprise Multi-Game System Running");
 });
