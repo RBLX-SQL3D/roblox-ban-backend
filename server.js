@@ -29,22 +29,39 @@ function getPHTime() {
 /* =========================================
    Roblox Avatar
 ========================================= */
-async function getRobloxAvatar(userId) {
+async function setCardAvatarAsCover(cardId, userId) {
     try {
-        const response = await axios.get(
-            "https://thumbnails.roblox.com/v1/users/avatar-headshot",
+        const avatarUrl = await getRobloxAvatar(userId);
+        if (!avatarUrl) return;
+
+        // 1. Attach image to Trello card
+        const attachResponse = await axios.post(
+            `https://api.trello.com/1/cards/${cardId}/attachments`,
             {
-                params: {
-                    userIds: userId,
-                    size: "150x150",
-                    format: "Png",
-                    isCircular: false
-                }
+                url: avatarUrl,
+                name: `Roblox Avatar ${userId}`
+            },
+            {
+                params: { key: TRELLO_KEY, token: TRELLO_TOKEN }
             }
         );
-        return response.data.data[0]?.imageUrl || null;
-    } catch {
-        return null;
+
+        const attachmentId = attachResponse.data.id;
+
+        // 2. Set attachment as cover
+        await axios.put(
+            `https://api.trello.com/1/cards/${cardId}`,
+            {
+                idAttachmentCover: attachmentId
+            },
+            {
+                params: { key: TRELLO_KEY, token: TRELLO_TOKEN }
+            }
+        );
+
+        console.log("Avatar set as cover for", userId);
+    } catch (err) {
+        console.error("Failed to set avatar cover:", err.message);
     }
 }
 
