@@ -12,43 +12,116 @@ const {
   BANNED_LIST_ID,
   TEMP_BANNED_LIST_ID,
   RESOLVED_LIST_ID,
-  DISCORD_WEBHOOK
+  DISCORD_WEBHOOK,
+  ROBLOX_API_KEY
 } = process.env;
 
-if (!TRELLO_KEY || !TRELLO_TOKEN || !BANNED_LIST_ID) {
-  console.log("❌ Missing Trello environment variables.");
+let banCache = new Map();
+
+/* ========================= */
+/* UTILITIES */
+/* ========================= */
+
+function phTime() {
+  return new Date().toLocaleString("en-PH", {
+    timeZone: "Asia/Manila"
+  });
+}
+
+async function logToDiscord(title, description, color = 15158332) {
+  if (!DISCORD_WEBHOOK) return;
+
+  await axios.post(DISCORD_WEBHOOK, {
+    embeds: [{
+      title,
+      description,
+      color,
+      timestamp: new Date().toISOString()
+    }]
+  }).catch(()=>{});
 }
 
 /* ========================= */
-/* DISCORD LOGGER */
+/* CACHE */
 /* ========================= */
 
-async function logToDiscord(title, description) {
-  if (!DISCORD_WEBHOOK) return;
+async function refreshCache() {
 
-  try {
-    await axios.post(DISCORD_WEBHOOK, {
-      embeds: [
-        {
-          title,
-          description,
-          color: 15158332,
-          timestamp: new Date().toISOString()
-        }
-      ]
-    });
-  } catch (err) {
-    console.log("Discord error:", err.message);
+  banCache.clear();
+
+  const lists = [BANNED_LIST_ID, TEMP_BANNED_LIST_ID];
+
+  for (const listId of lists) {
+
+    const res = await axios.get(
+      `https://api.trello.com/1/lists/${listId}/cards`,
+      { params: { key: TRELLO_KEY, token: TRELLO_TOKEN } }
+    );
+
+    for (const card of res.data) {
+
+      const match = card.name.match(/\d+/);
+      if (!match) continue;
+
+      banCache.set(match[0], {
+        cardId: card.id
+      });
+    }
   }
 }
 
 /* ========================= */
-/* APPLY BAN LOGIC */
+/* AUTO ALT DETECTION */
 /* ========================= */
 
-async function applyBan(cardId, reason, userId) {
+async function checkAltAccounts(userId) {
 
-  const reasonUpper = reason.toUpperCase().trim();
+  if (!ROBLOX_API_KEY) return [];
+
+  try {
+
+    const res = await axios.get(
+      `https://apis.roblox.com/cloud/v2/users/${userId}/linked-accounts`,
+      {
+        headers: {
+          "x-api-key": ROBLOX_API_KEY
+        }
+      }
+    );
+
+    return res.data.accounts || [];
+
+  } catch {
+    return [];
+  }
+}
+
+/* ========================= */
+/* CREATE CARD */
+/* ========================= */
+
+async function createCard(userId, username) {
+
+  const newCard = await axios.post(
+    "https://api.trello.com/1/cards",
+    {
+      name: `${userId} | ${username}`,
+      idList: BANNED_LIST_ID,
+      desc: ""
+    },
+    { params: { key: TRELLO_KEY, token: TRELLO_TOKEN } }
+  );
+
+  return newCard.data.id;
+}
+
+/* ========================= */
+/* APPLY BAN */
+/* ========================= */
+
+async function applyBan(cardId, userId, username, reason) {
+
+  const isExploit = reason.toUpperCase().includes("EXPLOIT");
 
   let start = null;
   let due = null;
@@ -56,7 +129,7 @@ async function applyBan(cardId, reason, userId) {
   let duration = "PERMANENT";
   let appealable = "NO";
 
-  if (!reasonUpper.includes("EXPLOIT")) {
+  if (!isExploit) {
 
     const startDate = new Date();
     const dueDate = new Date();
@@ -65,12 +138,12 @@ async function applyBan(cardId, reason, userId) {
     start = startDate.toISOString();
     due = dueDate.toISOString();
 
-    listId = TEMP_BANNED_LIST_ID;
     duration = "60 Days";
     appealable = "YES";
+    listId = TEMP_BANNED_LIST_ID;
   }
 
-  const desc =
+  const description =
 `Profile: https://www.roblox.com/users/${userId}/profile
 Reason: ${reason}
 Duration: ${duration}
@@ -79,11 +152,46 @@ Join Attempts: 0`;
 
   await axios.put(
     `https://api.trello.com/1/cards/${cardId}`,
+    { desc: description, idList: listId, start, due },
+    { params: { key: TRELLO_KEY, token: TRELLO_TOKEN } }
+  );
+
+  await logToDiscord(
+    "🔨 Ban Issued",
+    `User: ${username}\nReason: ${reason}\nDuration: ${duration}`
+  );
+}
+
+/* ========================= */
+/* JOIN ATTEMPT TRACKING */
+/* ========================= */
+
+async function incrementJoin(cardId, userId) {
+
+  const card = await axios.get(
+    `https://api.trello.com/1/cards/${cardId}`,
+    { params: { key: TRELLO_KEY, token: TRELLO_TOKEN } }
+  );
+
+  const match = card.data.desc.match(/Join Attempts:\s*(\d+)/);
+  let attempts = match ? parseInt(match[1]) : 0;
+  attempts++;
+
+  const updatedDesc = card.data.desc.replace(
+    /Join Attempts:\s*\d+/,
+    `Join Attempts: ${attempts}`
+  );
+
+  await axios.put(
+    `https://api.trello.com/1/cards/${cardId}`,
+    { desc: updatedDesc },
+    { params: { key: TRELLO_KEY, token: TRELLO_TOKEN } }
+  );
+
+  await axios.post(
+    `https://api.trello.com/1/cards/${cardId}/actions/comments`,
     {
-      desc,
-      idList: listId,
-      start,
-      due
+      text: `Attempted to join\nTime (PH): ${phTime()}`
     },
     { params: { key: TRELLO_KEY, token: TRELLO_TOKEN } }
   );
@@ -95,51 +203,82 @@ Join Attempts: 0`;
 
 app.post("/ban", async (req, res) => {
 
-  console.log("Ban request:", req.body);
-
   const { userId, username, type } = req.body;
 
-  if (!userId || !username || !type) {
+  if (!userId || !username || !type)
     return res.status(400).json({ error: "Missing data" });
-  }
 
   try {
 
-    const reason = type === "perm" ? "EXPLOITING" : "Rule Violation";
+    let cardId;
 
-    const newCard = await axios.post(
-      "https://api.trello.com/1/cards",
-      {
-        name: `${userId} | ${username}`,
-        idList: BANNED_LIST_ID,
-        desc: ""
-      },
-      { params: { key: TRELLO_KEY, token: TRELLO_TOKEN } }
-    );
+    if (banCache.has(userId)) {
+      cardId = banCache.get(userId).cardId;
+    } else {
+      cardId = await createCard(userId, username);
+    }
 
-    const cardId = newCard.data.id;
+    const reason = type === "perm"
+      ? "EXPLOITING"
+      : "Rule Violation";
 
-    await applyBan(cardId, reason, userId);
+    await applyBan(cardId, userId, username, reason);
 
-    await logToDiscord(
-      "🔨 Ban Issued",
-      `User: ${username}\nType: ${type}`
-    );
+    const alts = await checkAltAccounts(userId);
+
+    for (const alt of alts) {
+      await createCard(alt.id, alt.username);
+    }
+
+    await refreshCache();
 
     res.json({ success: true });
 
   } catch (err) {
-    console.log("❌ Ban error:", err.message);
+    console.log(err.message);
     res.status(500).json({ error: "Ban failed" });
   }
 });
 
 /* ========================= */
-/* START SERVER */
+/* CHECKBAN */
 /* ========================= */
 
-const PORT = process.env.PORT || 3000;
+app.get("/checkban", async (req, res) => {
 
-app.listen(PORT, () => {
-  console.log("Server running on port", PORT);
+  const { userId } = req.query;
+  if (!userId) return res.json({ permanent: false });
+
+  if (!banCache.has(userId))
+    return res.json({ permanent: false });
+
+  const cardId = banCache.get(userId).cardId;
+
+  const card = await axios.get(
+    `https://api.trello.com/1/cards/${cardId}`,
+    { params: { key: TRELLO_KEY, token: TRELLO_TOKEN } }
+  );
+
+  if (card.data.due && new Date() > new Date(card.data.due)) {
+
+    await axios.put(
+      `https://api.trello.com/1/cards/${cardId}`,
+      { idList: RESOLVED_LIST_ID },
+      { params: { key: TRELLO_KEY, token: TRELLO_TOKEN } }
+    );
+
+    await refreshCache();
+    return res.json({ permanent: false });
+  }
+
+  await incrementJoin(cardId, userId);
+
+  return res.json({
+    permanent: !card.data.due
+  });
+});
+
+app.listen(process.env.PORT || 3000, async () => {
+  await refreshCache();
+  console.log("Server running.");
 });
