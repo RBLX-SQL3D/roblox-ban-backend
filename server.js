@@ -6,10 +6,6 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-/* ========================= */
-/* ENV CONFIG */
-/* ========================= */
-
 const {
   TRELLO_KEY,
   TRELLO_TOKEN,
@@ -21,17 +17,12 @@ const {
 } = process.env;
 
 const GAMES = JSON.parse(process.env.ROBLOX_GAMES_CONFIG || "{}");
-
 let banCache = new Map();
 
-/* ========================= */
 /* UTILITIES */
-/* ========================= */
 
 function phTime() {
-  return new Date().toLocaleString("en-PH", {
-    timeZone: "Asia/Manila"
-  });
+  return new Date().toLocaleString("en-PH", { timeZone: "Asia/Manila" });
 }
 
 function extractReason(desc) {
@@ -42,7 +33,6 @@ function extractReason(desc) {
 
 async function discordLog(title, description) {
   if (!DISCORD_WEBHOOK) return;
-
   await axios.post(DISCORD_WEBHOOK, {
     embeds: [{
       title,
@@ -50,15 +40,12 @@ async function discordLog(title, description) {
       color: 15158332,
       timestamp: new Date().toISOString()
     }]
-  }).catch(() => {});
+  }).catch(()=>{});
 }
 
-/* ========================= */
-/* ROBLOX BAN API */
-/* ========================= */
+/* ROBLOX BAN */
 
 async function robloxBan(gameKey, userId, permanent, days = 60) {
-
   const game = GAMES[gameKey];
   if (!game) return;
 
@@ -80,11 +67,10 @@ async function robloxBan(gameKey, userId, permanent, days = 60) {
       "x-api-key": game.apiKey,
       "Content-Type": "application/json"
     }
-  }).catch(() => {});
+  }).catch(()=>{});
 }
 
 async function robloxUnban(gameKey, userId) {
-
   const game = GAMES[gameKey];
   if (!game) return;
 
@@ -92,15 +78,12 @@ async function robloxUnban(gameKey, userId) {
 
   await axios.delete(url, {
     headers: { "x-api-key": game.apiKey }
-  }).catch(() => {});
+  }).catch(()=>{});
 }
 
-/* ========================= */
 /* ALT DETECTION */
-/* ========================= */
 
 async function detectAndBanAlts(gameKey, mainUserId, cardId) {
-
   const game = GAMES[gameKey];
   if (!game) return;
 
@@ -113,7 +96,6 @@ async function detectAndBanAlts(gameKey, mainUserId, cardId) {
     const alts = res.data.linkedAccounts || [];
 
     for (const alt of alts) {
-
       await robloxBan(gameKey, alt.userId, false);
 
       await axios.post(
@@ -131,12 +113,9 @@ Time (PH): ${phTime()}`
   } catch {}
 }
 
-/* ========================= */
-/* CACHE SYSTEM */
-/* ========================= */
+/* CACHE */
 
 async function refreshCache() {
-
   banCache.clear();
 
   const res = await axios.get(
@@ -151,12 +130,9 @@ async function refreshCache() {
   }
 }
 
-/* ========================= */
 /* CARD MANAGEMENT */
-/* ========================= */
 
 async function getOrCreateCard(userId, username) {
-
   if (banCache.has(userId))
     return banCache.get(userId).cardId;
 
@@ -176,7 +152,6 @@ async function getOrCreateCard(userId, username) {
 async function applyBan(gameKey, cardId, userId, username, type) {
 
   const isPermanent = type === "perm";
-
   const card = await axios.get(
     `https://api.trello.com/1/cards/${cardId}`,
     { params: { key: TRELLO_KEY, token: TRELLO_TOKEN } }
@@ -190,7 +165,7 @@ async function applyBan(gameKey, cardId, userId, username, type) {
 
     const permTime = phTime();
 
-    const updatedDescription =
+    const updated =
 `Profile: https://www.roblox.com/users/${userId}/profile
 Reason: EXPLOITING
 Duration: PERMANENT
@@ -201,7 +176,7 @@ Join Attempts: ${attempts}`;
     await axios.put(
       `https://api.trello.com/1/cards/${cardId}`,
       {
-        desc: updatedDescription,
+        desc: updated,
         idList: BANNED_LIST_ID,
         start: null,
         due: null
@@ -218,7 +193,7 @@ Join Attempts: ${attempts}`;
     const dueDate = new Date();
     dueDate.setDate(startDate.getDate() + 60);
 
-    const updatedDescription =
+    const updated =
 `Profile: https://www.roblox.com/users/${userId}/profile
 Reason: Rule Violation
 Duration: 60 Days
@@ -229,7 +204,7 @@ Join Attempts: ${attempts}`;
     await axios.put(
       `https://api.trello.com/1/cards/${cardId}`,
       {
-        desc: updatedDescription,
+        desc: updated,
         idList: TEMP_BANNED_LIST_ID,
         start: startDate.toISOString(),
         due: dueDate.toISOString()
@@ -244,9 +219,7 @@ Join Attempts: ${attempts}`;
   await detectAndBanAlts(gameKey, userId, cardId);
 }
 
-/* ========================= */
-/* JOIN ATTEMPTS */
-/* ========================= */
+/* JOIN ATTEMPT */
 
 async function handleJoinAttempt(cardId) {
 
@@ -281,14 +254,11 @@ Time (PH): ${phTime()}`
   );
 }
 
-/* ========================= */
 /* ENDPOINTS */
-/* ========================= */
 
 app.post("/ban", async (req, res) => {
 
   const { userId, username, type, game } = req.body;
-
   if (!userId || !username || !type || !game)
     return res.status(400).json({ error: "Missing data" });
 
@@ -302,7 +272,6 @@ app.post("/ban", async (req, res) => {
 app.get("/checkban", async (req, res) => {
 
   const { userId, game } = req.query;
-
   if (!banCache.has(userId))
     return res.json({ banned: false });
 
@@ -337,10 +306,6 @@ app.get("/checkban", async (req, res) => {
     reason: reason
   });
 });
-
-/* ========================= */
-/* START SERVER */
-/* ========================= */
 
 app.listen(process.env.PORT || 3000, async () => {
   await refreshCache();
