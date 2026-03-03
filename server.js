@@ -11,12 +11,14 @@ app.use(express.json());
 /* ENV CONFIG */
 /* ========================= */
 
-const TRELLO_KEY = process.env.TRELLO_KEY;
-const TRELLO_TOKEN = process.env.TRELLO_TOKEN;
-const BANNED_LIST_ID = process.env.BANNED_LIST_ID;
-const DISCORD_WEBHOOK = process.env.DISCORD_WEBHOOK;
-const ROBLOX_API_KEY = process.env.ROBLOX_API_KEY;
-const ROBLOX_UNIVERSE_ID = process.env.ROBLOX_UNIVERSE_ID;
+const {
+    TRELLO_KEY,
+    TRELLO_TOKEN,
+    BANNED_LIST_ID,
+    DISCORD_WEBHOOK,
+    ROBLOX_API_KEY,
+    ROBLOX_UNIVERSE_ID
+} = process.env;
 
 /* ========================= */
 /* CACHE */
@@ -35,7 +37,9 @@ function getPHTime() {
 }
 
 async function getRobloxUser(userId) {
-    const res = await axios.get(`https://users.roblox.com/v1/users/${userId}`);
+    const res = await axios.get(
+        `https://users.roblox.com/v1/users/${userId}`
+    );
     return res.data;
 }
 
@@ -78,7 +82,7 @@ async function refreshBanCache() {
     banCache.clear();
 
     for (const card of response.data) {
-        const userId = card.name.split("|")[0].trim();
+        const userId = String(card.name.split("|")[0].trim());
 
         banCache.set(userId, {
             cardId: card.id,
@@ -97,24 +101,33 @@ app.get("/search", async (req, res) => {
     let { userId, username } = req.query;
 
     try {
-        // Convert username → userId if needed
+        /* Convert username → userId */
         if (!userId && username) {
             const usernameRes = await axios.post(
                 "https://users.roblox.com/v1/usernames/users",
                 {
                     usernames: [username],
                     excludeBannedUsers: false
+                },
+                {
+                    headers: { "Content-Type": "application/json" }
                 }
             );
 
-            if (!usernameRes.data.data.length) {
+            if (
+                !usernameRes.data ||
+                !usernameRes.data.data ||
+                !usernameRes.data.data.length
+            ) {
                 return res.json({ found: false });
             }
 
-            userId = usernameRes.data.data[0].id;
+            userId = String(usernameRes.data.data[0].id);
         }
 
         if (!userId) return res.json({ found: false });
+
+        userId = String(userId);
 
         const record = banCache.get(userId);
         if (!record) return res.json({ found: false });
@@ -134,31 +147,33 @@ app.get("/search", async (req, res) => {
         });
 
     } catch (err) {
-        console.log("Search error:", err.message);
+        console.log("Search error:", err.response?.data || err.message);
         res.status(500).json({ found: false });
     }
 });
 
 /* ========================= */
-/* CHECK BAN + AUTO ALT BAN */
+/* CHECK BAN + ALT AUTO BAN */
 /* ========================= */
 
 app.get("/checkban", async (req, res) => {
-    const { userId, mainId } = req.query;
+    let { userId, mainId } = req.query;
 
     if (!userId) return res.json({ permanent: false });
 
+    userId = String(userId);
+
     const record = banCache.get(userId);
 
-    // Main banned
+    /* MAIN banned */
     if (record) {
         await logJoinAttempt(userId, record.cardId, "MAIN");
         return res.json({ permanent: true });
     }
 
-    // Alt of banned main
-    if (mainId && banCache.has(mainId)) {
-        const mainRecord = banCache.get(mainId);
+    /* ALT of banned main */
+    if (mainId && banCache.has(String(mainId))) {
+        const mainRecord = banCache.get(String(mainId));
 
         await logJoinAttempt(userId, mainRecord.cardId, "ALT");
 
@@ -204,8 +219,7 @@ async function incrementAttemptCounter(cardId) {
     );
 
     let desc = card.data.desc;
-    let attempts = extractAttempts(desc);
-    attempts++;
+    let attempts = extractAttempts(desc) + 1;
 
     if (/Join Attempts:\s*\d+/.test(desc)) {
         desc = desc.replace(/Join Attempts:\s*\d+/, `Join Attempts: ${attempts}`);
@@ -218,6 +232,9 @@ async function incrementAttemptCounter(cardId) {
         { desc },
         { params: { key: TRELLO_KEY, token: TRELLO_TOKEN } }
     );
+
+    /* Update cache */
+    banCache.get(card.data.name.split("|")[0].trim()).description = desc;
 }
 
 /* ========================= */
@@ -231,7 +248,7 @@ async function autoBanAlt(userId) {
         await axios.post(
             `https://apis.roblox.com/cloud/v2/universes/${ROBLOX_UNIVERSE_ID}/bans`,
             {
-                userId: userId,
+                userId: Number(userId),
                 duration: "P9999D",
                 reason: "Linked to permanently banned account"
             },
@@ -283,7 +300,7 @@ app.post("/webhook", async (req, res) => {
 });
 
 /* ========================= */
-/* SERVER START */
+/* START SERVER */
 /* ========================= */
 
 const PORT = process.env.PORT || 3000;
