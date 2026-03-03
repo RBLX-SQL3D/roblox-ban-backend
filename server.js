@@ -18,9 +18,9 @@ const {
 
 let banCache = new Map();
 
-/* ===================================== */
+/* ========================= */
 /* UTILITIES */
-/* ===================================== */
+/* ========================= */
 
 function phTime() {
   return new Date().toLocaleString("en-PH", {
@@ -41,12 +41,11 @@ async function discordLog(title, description, color = 15158332) {
   }).catch(()=>{});
 }
 
-/* ===================================== */
-/* CACHE ALL CARDS FROM BOARD */
-/* ===================================== */
+/* ========================= */
+/* REFRESH BOARD CACHE */
+/* ========================= */
 
 async function refreshCache() {
-
   banCache.clear();
 
   const res = await axios.get(
@@ -55,7 +54,6 @@ async function refreshCache() {
   );
 
   for (const card of res.data) {
-
     const match = card.name.match(/\d+/);
     if (!match) continue;
 
@@ -66,9 +64,9 @@ async function refreshCache() {
   }
 }
 
-/* ===================================== */
+/* ========================= */
 /* CREATE OR GET CARD */
-/* ===================================== */
+/* ========================= */
 
 async function getOrCreateCard(userId, username) {
 
@@ -89,11 +87,11 @@ async function getOrCreateCard(userId, username) {
   return card.data.id;
 }
 
-/* ===================================== */
-/* APPLY BAN LOGIC */
-/* ===================================== */
+/* ========================= */
+/* APPLY BAN */
+/* ========================= */
 
-async function applyBan(cardId, userId, username, type, reason) {
+async function applyBan(cardId, userId, username, type) {
 
   const isPermanent = type === "perm";
 
@@ -102,9 +100,9 @@ async function applyBan(cardId, userId, username, type, reason) {
   let listId = isPermanent ? BANNED_LIST_ID : TEMP_BANNED_LIST_ID;
   let duration = "PERMANENT";
   let appealable = "NO";
+  let reason = isPermanent ? "EXPLOITING" : "Rule Violation";
 
   if (!isPermanent) {
-
     const startDate = new Date();
     const dueDate = new Date();
     dueDate.setDate(startDate.getDate() + 60);
@@ -130,13 +128,13 @@ Join Attempts: 0`;
 
   await discordLog(
     "Ban Updated",
-    `User: ${username}\nType: ${duration}\nReason: ${reason}`
+    `User: ${username}\nDuration: ${duration}`
   );
 }
 
-/* ===================================== */
-/* JOIN ATTEMPT HANDLER */
-/* ===================================== */
+/* ========================= */
+/* JOIN ATTEMPT */
+/* ========================= */
 
 async function handleJoinAttempt(cardId) {
 
@@ -151,14 +149,14 @@ async function handleJoinAttempt(cardId) {
   let attempts = match ? parseInt(match[1]) : 0;
   attempts++;
 
-  const newDesc = desc.replace(
+  const updatedDesc = desc.replace(
     /Join Attempts:\s*\d+/,
     `Join Attempts: ${attempts}`
   );
 
   await axios.put(
     `https://api.trello.com/1/cards/${cardId}`,
-    { desc: newDesc },
+    { desc: updatedDesc },
     { params: { key: TRELLO_KEY, token: TRELLO_TOKEN } }
   );
 
@@ -171,9 +169,9 @@ async function handleJoinAttempt(cardId) {
   );
 }
 
-/* ===================================== */
+/* ========================= */
 /* BAN ENDPOINT */
-/* ===================================== */
+/* ========================= */
 
 app.post("/ban", async (req, res) => {
 
@@ -185,13 +183,7 @@ app.post("/ban", async (req, res) => {
   try {
 
     const cardId = await getOrCreateCard(userId, username);
-
-    const reason = type === "perm"
-      ? "EXPLOITING"
-      : "Rule Violation";
-
-    await applyBan(cardId, userId, username, type, reason);
-
+    await applyBan(cardId, userId, username, type);
     await refreshCache();
 
     res.json({ success: true });
@@ -202,17 +194,17 @@ app.post("/ban", async (req, res) => {
   }
 });
 
-/* ===================================== */
+/* ========================= */
 /* CHECKBAN */
-/* ===================================== */
+/* ========================= */
 
 app.get("/checkban", async (req, res) => {
 
   const { userId } = req.query;
-  if (!userId) return res.json({ permanent: false });
+  if (!userId) return res.json({ banned: false });
 
   if (!banCache.has(userId))
-    return res.json({ permanent: false });
+    return res.json({ banned: false });
 
   const { cardId } = banCache.get(userId);
 
@@ -230,19 +222,17 @@ app.get("/checkban", async (req, res) => {
     );
 
     await refreshCache();
-    return res.json({ permanent: false });
+    return res.json({ banned: false });
   }
 
   await handleJoinAttempt(cardId);
 
-  return res.json({
-    permanent: !card.data.due
-  });
+  return res.json({ banned: true });
 });
 
-/* ===================================== */
+/* ========================= */
 
 app.listen(process.env.PORT || 3000, async () => {
   await refreshCache();
-  console.log("Enterprise moderation backend active.");
+  console.log("NOX Moderation Backend Running");
 });
